@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — AI Email Orchestrator{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+
+  <!-- Page heading -->
+  <div>
+    <h1 class="text-2xl font-bold tracking-tight text-gray-900">Tổng quan Email</h1>
+    <p class="mt-1 text-sm text-gray-500">
+      Theo dõi thống kê xử lý và quản lý hộp thư được phân loại bởi AI.
+    </p>
+  </div>
+
+  <!-- Phần 1: Stats Cards -->
+  <section aria-label="Thống kê">
+    <div class="grid grid-cols-1 gap-6 md:grid-cols-3">
+
+      <!-- Card 1: Tổng email đã xử lý -->
+      <article
+        class="rounded-xl border border-gray-100 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md"
+      >
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-sm font-medium text-gray-500">Tổng email đã xử lý</p>
+            <p id="stat-total" class="mt-2 text-3xl font-bold text-gray-900">—</p>
+          </div>
+          <span
+            class="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 text-blue-600 transition-all duration-300"
+          >
+            <i class="fa-solid fa-inbox text-xl"></i>
+          </span>
+        </div>
+      </article>
+
+      <!-- Card 2: Email khẩn cấp -->
+      <article
+        class="rounded-xl border border-gray-100 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md"
+      >
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-sm font-medium text-gray-500">Email khẩn cấp</p>
+            <p id="stat-urgent" class="mt-2 text-3xl font-bold text-gray-900">—</p>
+          </div>
+          <span
+            class="flex h-12 w-12 items-center justify-center rounded-xl bg-red-100 text-red-600 transition-all duration-300"
+          >
+            <i class="fa-solid fa-triangle-exclamation text-xl"></i>
+          </span>
+        </div>
+      </article>
+
+      <!-- Card 3: Thời gian tiết kiệm -->
+      <article
+        class="rounded-xl border border-gray-100 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md"
+      >
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-sm font-medium text-gray-500">Thời gian tiết kiệm</p>
+            <p id="stat-time" class="mt-2 text-3xl font-bold text-gray-900">—</p>
+          </div>
+          <span
+            class="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-100 text-purple-600 transition-all duration-300"
+          >
+            <i class="fa-solid fa-clock text-xl"></i>
+          </span>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- Phần 2: Bảng Email -->
+  <section aria-label="Danh sách email">
+    <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <div class="border-b border-gray-100 px-6 py-4">
+        <h2 class="text-lg font-semibold text-gray-900">Hộp thư gần đây</h2>
+        <p class="mt-0.5 text-sm text-gray-500">Email đã quét và phân loại tự động</p>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full table-auto text-left text-sm">
+          <thead>
+            <tr class="border-b border-gray-100 bg-gray-50/80">
+              <th class="whitespace-nowrap px-6 py-4 font-semibold text-gray-600">Người gửi</th>
+              <th class="whitespace-nowrap px-6 py-4 font-semibold text-gray-600">Tiêu đề</th>
+              <th class="whitespace-nowrap px-6 py-4 font-semibold text-gray-600">Phân loại</th>
+              <th class="whitespace-nowrap px-6 py-4 font-semibold text-gray-600">Trạng thái nháp</th>
+              <th class="whitespace-nowrap px-6 py-4 text-right font-semibold text-gray-600">Hành động</th>
+            </tr>
+          </thead>
+          <tbody id="email-table-body" class="divide-y divide-gray-100">
+            <!-- JS render rows; placeholder khi chưa có dữ liệu -->
+            <tr id="email-table-empty">
+              <td colspan="5" class="px-6 py-12 text-center text-gray-400">
+                <i class="fa-solid fa-spinner fa-spin mb-2 text-2xl text-indigo-400"></i>
+                <p class="text-sm">Đang tải danh sách email…</p>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!--
+      Badge design system (dùng khi render bằng JS):
+      - Urgent:      bg-red-100 text-red-700
+      - Need Reply:  bg-blue-100 text-blue-700
+      - Spam:        bg-gray-100 text-gray-700
+    -->
+  </section>
+
+</div>
+
+<!-- Phần 3: Modal xem bản nháp -->
+<div
+  id="draft-modal"
+  class="fixed inset-0 z-50 hidden"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="draft-modal-title"
+>
+  <!-- Overlay -->
+  <div
+    id="draft-modal-overlay"
+    class="absolute inset-0 bg-black/50 transition-opacity duration-300"
+    aria-hidden="true"
+  ></div>
+
+  <!-- Modal box -->
+  <div class="relative flex min-h-full items-center justify-center p-4">
+    <div
+      class="relative w-full max-w-2xl rounded-2xl border border-gray-200 bg-white p-6 shadow-2xl transition-all duration-300"
+    >
+      <div class="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <h3 id="draft-modal-title" class="text-lg font-semibold text-gray-900">
+            Bản nháp trả lời
+          </h3>
+          <p id="draft-modal-subtitle" class="mt-1 text-sm text-gray-500">
+            Chỉnh sửa nội dung trước khi gửi lên Gmail.
+          </p>
+        </div>
+        <button
+          id="btn-draft-close-x"
+          type="button"
+          class="rounded-lg p-2 text-gray-400 transition-all duration-300 hover:bg-gray-100 hover:text-gray-600"
+          aria-label="Đóng"
+        >
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <label for="draft-modal-content" class="mb-2 block text-sm font-medium text-gray-700">
+        Nội dung
+      </label>
+      <textarea
+        id="draft-modal-content"
+        rows="12"
+        class="w-full resize-y rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-800 transition-all duration-300 focus:border-indigo-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
+        placeholder="Nội dung bản nháp sẽ hiển thị tại đây…"
+      ></textarea>
+
+      <input type="hidden" id="draft-modal-email-id" value="" />
+
+      <div class="mt-6 flex flex-wrap items-center justify-end gap-3">
+        <button
+          id="btn-draft-close"
+          type="button"
+          class="rounded-xl border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-700 transition-all duration-300 hover:bg-gray-50 hover:shadow-sm"
+        >
+          Đóng
+        </button>
+        <button
+          id="btn-draft-save"
+          type="button"
+          class="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition-all duration-300 hover:bg-indigo-700 hover:shadow-md"
+        >
+          <i class="fa-solid fa-floppy-disk mr-1.5"></i>
+          Lưu
+        </button>
+        <button
+          id="btn-draft-send-gmail"
+          type="button"
+          class="rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition-all duration-300 hover:from-emerald-700 hover:to-emerald-600 hover:shadow-md"
+        >
+          <i class="fa-brands fa-google mr-1.5"></i>
+          Gửi lên Gmail
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
