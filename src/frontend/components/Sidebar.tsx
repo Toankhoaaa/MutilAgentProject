@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
+import type { UserProfile } from "@/lib/types";
 
 interface NavItem {
   href: string;
@@ -42,7 +43,11 @@ const navItems: NavItem[] = [
   { href: "/dashboard#analytics", label: "Analytics", icon: <ChartIcon /> },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  user?: UserProfile | null;
+}
+
+export default function Sidebar({ user }: SidebarProps) {
   const router = useRouter();
 
   return (
@@ -80,10 +85,27 @@ export default function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
-        <div className="text-xs text-slate-500 text-center">
-          <p>v1.0.0</p>
-          <p className="mt-0.5">Multi-Agent AI</p>
-        </div>
+        {user ? (
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center flex-shrink-0">
+              <span className="text-white text-[10px] font-bold">
+                {user.display_name
+                  ? user.display_name.split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase()
+                  : user.email[0].toUpperCase()}
+              </span>
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-slate-300 truncate leading-tight">
+                {user.display_name ?? user.email.split("@")[0]}
+              </p>
+              <p className="text-[10px] text-slate-500 truncate leading-tight">{user.email}</p>
+            </div>
+          </div>
+        ) : (
+          <div className="text-[10px] text-slate-600 text-center uppercase tracking-widest">
+            Multi-Agent AI
+          </div>
+        )}
       </div>
     </aside>
   );

@@ -69,3 +69,4 @@ CLAUDE.md
 .agents/skills/design-taste-frontend/SKILL.md
 .gitignore
 skills-lock.json
+src/email_orchestrator.db-journal

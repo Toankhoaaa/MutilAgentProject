@@ -11,7 +11,7 @@ interface LayoutProps {
 export default function Layout({ children, user }: LayoutProps) {
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar user={user} />
       <div className="main-area">
         <Topbar user={user} />
         <main className="page-content">{children}</main>

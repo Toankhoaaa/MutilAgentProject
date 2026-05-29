@@ -320,7 +320,6 @@ export default function DraftModal({ email, onClose, onSent }: DraftModalProps) 
   };
 
   const draft = email.draft;
-  const classification = email.classification;
   const isMeeting = scheduling?.is_meeting_request === true;
   const showNormalSend = draft && !draft.is_sent && !isMeeting;
   const showCalendarSend = draft && !draft.is_sent && isMeeting && !!scheduling?.start_datetime;
@@ -344,38 +343,12 @@ export default function DraftModal({ email, onClose, onSent }: DraftModalProps) 
           </button>
         </div>
 
-        {/* ── Classification info ── */}
-        {classification && (
-          <div className="bg-slate-50 rounded-lg p-3 mb-4 border border-slate-100">
-            <div className="flex flex-wrap gap-2">
-              {classification.category && (
-                <span className={`category-badge category-${classification.category}`}>
-                  {classification.category}
-                </span>
-              )}
-              {classification.priority_score != null && (
-                <span className="text-xs text-slate-500">
-                  Ưu tiên: <strong>{classification.priority_score}/5</strong>
-                </span>
-              )}
-              {classification.confidence != null && (
-                <span className="text-xs text-slate-500">
-                  Độ tin cậy: <strong>{Math.round(classification.confidence * 100)}%</strong>
-                </span>
-              )}
-            </div>
-            {classification.summary && (
-              <p className="text-xs text-slate-600 mt-2 italic">{classification.summary}</p>
-            )}
-          </div>
-        )}
-
         {/* ── Email body preview ── */}
         <div className="mb-4">
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1.5">
+          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-2">
             Email gốc
           </p>
-          <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 max-h-28 overflow-y-auto">
+          <div className="bg-slate-50 rounded-lg p-3 border border-slate-200 max-h-52 overflow-y-auto">
             <p className="text-sm text-slate-600 whitespace-pre-wrap leading-relaxed">
               {email.body ?? "(Không có nội dung)"}
             </p>
@@ -396,10 +369,17 @@ export default function DraftModal({ email, onClose, onSent }: DraftModalProps) 
         {/* ── Draft editor ── */}
         {draft ? (
           <div className="mb-4">
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
-                Bản nháp AI
-              </p>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+                  Bản nháp AI
+                </p>
+                {!draft.is_sent && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-50 text-indigo-600 border border-indigo-100">
+                    Chờ gửi
+                  </span>
+                )}
+              </div>
               {draft.is_sent && (
                 <span className="text-xs text-emerald-600 font-medium flex items-center gap-1">
                   <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
@@ -410,8 +390,8 @@ export default function DraftModal({ email, onClose, onSent }: DraftModalProps) 
               )}
             </div>
             <textarea
-              className="w-full border border-slate-200 rounded-lg p-3 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300"
-              rows={5}
+              className="w-full border-2 border-indigo-100 rounded-xl p-4 text-sm text-slate-700 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300 leading-relaxed bg-white"
+              rows={7}
               value={content}
               onChange={(e) => setContent(e.target.value)}
               disabled={draft.is_sent ?? false}

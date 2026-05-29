@@ -8,30 +8,10 @@ interface StatCardProps {
 }
 
 const colorMap = {
-  indigo: {
-    bg: "bg-indigo-50",
-    icon: "bg-indigo-100 text-indigo-600",
-    value: "text-indigo-700",
-    border: "border-indigo-100",
-  },
-  emerald: {
-    bg: "bg-emerald-50",
-    icon: "bg-emerald-100 text-emerald-600",
-    value: "text-emerald-700",
-    border: "border-emerald-100",
-  },
-  amber: {
-    bg: "bg-amber-50",
-    icon: "bg-amber-100 text-amber-600",
-    value: "text-amber-700",
-    border: "border-amber-100",
-  },
-  rose: {
-    bg: "bg-rose-50",
-    icon: "bg-rose-100 text-rose-600",
-    value: "text-rose-700",
-    border: "border-rose-100",
-  },
+  indigo:  { icon: "bg-slate-100 text-slate-500", value: "text-slate-900", border: "border-slate-200/70" },
+  emerald: { icon: "bg-slate-100 text-slate-500", value: "text-slate-900", border: "border-slate-200/70" },
+  amber:   { icon: "bg-slate-100 text-slate-500", value: "text-slate-900", border: "border-slate-200/70" },
+  rose:    { icon: "bg-rose-50 text-rose-500",    value: "text-rose-600",  border: "border-rose-100"     },
 };
 
 export default function StatCard({

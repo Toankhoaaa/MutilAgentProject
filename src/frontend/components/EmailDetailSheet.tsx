@@ -23,6 +23,10 @@ function SentimentBadge({ sentiment }: { sentiment: string }) {
   );
 }
 
+function formatCategory(cat: string): string {
+  return cat.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function LanguageBadge({ lang }: { lang: string }) {
   return (
     <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-semibold bg-indigo-50 text-indigo-700 border border-indigo-100 uppercase">
@@ -177,7 +181,7 @@ export default function EmailDetailSheet({ email, onClose }: Props) {
                   <div>
                     <span className="text-slate-400 block mb-0.5">Category</span>
                     <span className={`category-badge category-${email.classification.category}`}>
-                      {email.classification.category}
+                      {formatCategory(email.classification.category)}
                     </span>
                   </div>
                 )}

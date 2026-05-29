@@ -146,10 +146,14 @@ export default function DashboardPage() {
       </Head>
 
       <Layout user={user ?? null}>
+        {/* AI Activity Bar */}
+        <AgentStatusBadge status={agentStatus} loading={agentLoading} />
+
         {/* Page header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
-          <div className="flex items-center gap-3 flex-wrap">
-            <AgentStatusBadge status={agentStatus} loading={agentLoading} />
+          <div>
+            <h1 className="text-xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
+            <p className="text-sm text-slate-500 mt-0.5">AI-powered email management</p>
           </div>
 
           <div className="flex items-center gap-2">

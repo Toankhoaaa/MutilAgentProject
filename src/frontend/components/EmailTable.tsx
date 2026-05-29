@@ -32,6 +32,10 @@ function formatDate(iso: string | null): string {
   });
 }
 
+function formatCategory(cat: string): string {
+  return cat.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function PriorityDots({ score }: { score: number | null }) {
   if (score == null) return <span className="text-slate-300">—</span>;
   return (
@@ -147,30 +151,30 @@ export default function EmailTable({
                 return (
                   <tr
                     key={email.id}
-                    className="border-b border-slate-50 hover:bg-slate-50/60 transition-colors"
+                    className="border-b border-slate-100 hover:bg-slate-50 transition-colors group"
                   >
-                    <td className="px-5 py-3 max-w-[140px]">
+                    <td className="px-5 py-3.5 max-w-[140px] border-l-2 border-l-transparent group-hover:border-l-indigo-400 transition-colors">
                       <p className="truncate text-slate-700 font-medium text-xs">
                         {email.sender ?? "Unknown"}
                       </p>
                     </td>
-                    <td className="px-3 py-3 max-w-[200px]">
+                    <td className="px-3 py-3.5 max-w-[200px]">
                       <p className="truncate text-slate-700 text-xs">{email.subject ?? "(No subject)"}</p>
                     </td>
-                    <td className="px-3 py-3 hidden md:table-cell">
+                    <td className="px-3 py-3.5 hidden md:table-cell">
                       {cat ? (
-                        <span className={`category-badge category-${cat}`}>{cat}</span>
+                        <span className={`category-badge category-${cat}`}>{formatCategory(cat)}</span>
                       ) : (
                         <span className="text-slate-300 text-xs">—</span>
                       )}
                     </td>
-                    <td className="px-3 py-3 hidden lg:table-cell">
+                    <td className="px-3 py-3.5 hidden lg:table-cell">
                       <PriorityDots score={email.classification?.priority_score ?? null} />
                     </td>
-                    <td className="px-3 py-3 text-xs text-slate-400 hidden sm:table-cell whitespace-nowrap">
+                    <td className="px-3 py-3.5 text-xs text-slate-400 hidden sm:table-cell whitespace-nowrap">
                       {formatDate(email.received_at)}
                     </td>
-                    <td className="px-5 py-3">
+                    <td className="px-5 py-3.5">
                       <div className="flex items-center justify-end gap-1">
                         <button
                           onClick={() => onViewDetail(email)}
