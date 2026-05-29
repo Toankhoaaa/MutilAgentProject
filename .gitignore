@@ -59,9 +59,14 @@ Thumbs.db
 logs/
 
 # Frontend (Next.js)
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/build/
-frontend/.vercel
-frontend/*.tsbuildinfo
+src/frontend/node_modules/
+src/frontend/.next/
+src/frontend/out/
+src/frontend/build/
+src/frontend/.vercel
+src/frontend/*.tsbuildinfo
+CLAUDE.md
+.agents/skills/design-taste-frontend/SKILL.md
+.gitignore
+skills-lock.json
+src/email_orchestrator.db-journal
