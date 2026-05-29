@@ -8,9 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_classifier_agent, get_response_agent
-from app.main import app
-from app.models.user import User
+from backend.api.dependencies import get_classifier_agent, get_response_agent
+from backend.main import app
+from backend.models.user import User
 
 
 @pytest.mark.usefixtures("seed_data")

@@ -11,15 +11,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.core.database import get_db
-from app.core.security import create_access_token
-from app.main import app
-from app.models.agent_run import AgentRun
-from app.models.base import Base
-from app.models.classification import Classification
-from app.models.draft import Draft
-from app.models.email import Email
-from app.models.user import User
+from backend.core.database import get_db
+from backend.core.security import create_access_token
+from backend.main import app
+from backend.models.agent_run import AgentRun
+from backend.models.base import Base
+from backend.models.classification import Classification
+from backend.models.draft import Draft
+from backend.models.email import Email
+from backend.models.user import User
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
 
