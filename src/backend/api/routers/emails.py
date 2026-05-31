@@ -25,7 +25,8 @@ from backend.schemas.api_schemas import (
     DraftResponse,
     DraftSendResponse,
     DraftUpdateSchema,
-    ProcessEmailsResponse,
+    ProcessEmailRequest,
+    ProcessEmailResult,
 )
 from backend.services.agents import (
     EmailClassifierAgent,
@@ -36,11 +37,7 @@ from backend.services.calendar_service import (
     CalendarAuthenticationError,
     GoogleCalendarService,
 )
-from backend.services.gmail_service import (
-    GmailAuthenticationError,
-    GmailService,
-    google_credentials_from_token_json,
-)
+from backend.services.gmail_service import GmailService
 from backend.services.orchestrator import EmailOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -50,54 +47,37 @@ router = APIRouter(prefix="/emails", tags=["Emails"])
 
 @router.post(
     "/process",
-    response_model=ProcessEmailsResponse,
-    summary="Process new emails",
+    response_model=ProcessEmailResult,
+    summary="Classify email and generate draft",
     description=(
-        "Fetches unread messages from Gmail, runs classification "
-        "and optional reply drafting through ``EmailOrchestrator``, and persists results."
+        "Accepts raw email text, runs classification and optional reply drafting "
+        "through ``EmailOrchestrator``, and returns results directly without DB persistence."
     ),
 )
-async def process_emails(
+async def process_email(
+    payload: ProcessEmailRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
     response_agent: EmailResponseAgent = Depends(get_response_agent),
-) -> ProcessEmailsResponse:
-    """Trigger a batch run that ingests unread mail and runs the multi-agent pipeline."""
-    if not current_user.google_oauth_token:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Google OAuth token missing. Please sign in with Google again.",
-        )
-
-    try:
-        creds = google_credentials_from_token_json(current_user.google_oauth_token)
-    except GmailAuthenticationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
-        ) from exc
-
-    gmail_service = GmailService(credentials=creds)
-    raw_emails = await gmail_service.fetch_unread_emails(limit=5)
+) -> ProcessEmailResult:
+    """Classify raw email text and draft a reply; no data is written to the database."""
+    raw_email = {
+        "subject": payload.subject,
+        "body": payload.text,
+        "sender": payload.sender,
+    }
 
     orchestrator = EmailOrchestrator(
         db=db,
-        gmail_service=gmail_service,
+        gmail_service=None,
         classifier_agent=classifier_agent,
         response_agent=response_agent,
         user_id=current_user.id,
-        raw_emails=raw_emails,
     )
 
-    result = await orchestrator.process_new_emails(limit=5)
-
-    refreshed_token = gmail_service.credentials_to_json()
-    if refreshed_token != current_user.google_oauth_token:
-        current_user.google_oauth_token = refreshed_token
-        db.commit()
-
-    return ProcessEmailsResponse.model_validate(result)
+    result = await orchestrator.process_one_stateless(raw_email)
+    return ProcessEmailResult.model_validate(result)
 
 
 @router.put(

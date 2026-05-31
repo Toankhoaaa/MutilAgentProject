@@ -45,7 +45,7 @@ class EmailOrchestrator:
     def __init__(
         self,
         db: Session,
-        gmail_service: GmailService,
+        gmail_service: GmailService | None,
         classifier_agent: EmailClassifierAgent,
         response_agent: EmailResponseAgent,
         user_id: uuid.UUID | None = None,
@@ -251,6 +251,34 @@ class EmailOrchestrator:
             raise
 
         return summary
+
+    async def process_one_stateless(
+        self, raw_email: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Classify a single email and optionally draft a reply with no DB writes."""
+        classification, _ = await self._classify_email(raw_email)
+        result: dict[str, Any] = {
+            "category": classification.category.value,
+            "priority_score": classification.priority_score,
+            "summary": classification.summary,
+            "confidence": classification.confidence,
+            "draft_content": None,
+            "draft_subject": None,
+        }
+
+        if EmailResponseAgent.is_eligible(classification.category):
+            tone, signature = self._load_agent_customization()
+            reply = await self._response.draft_reply(
+                email_subject=raw_email.get("subject") or "",
+                email_body=raw_email.get("body") or "",
+                classification=classification,
+                tone=tone,
+                signature=signature,
+            )
+            result["draft_content"] = reply.body_content
+            result["draft_subject"] = reply.subject
+
+        return result
 
     def _resolve_user_id(self) -> uuid.UUID:
         """Return the configured or first active user id for mailbox ownership."""
