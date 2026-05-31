@@ -10,7 +10,6 @@ from backend.api.dependencies import get_db
 from backend.models.agent_run import AgentRun
 from backend.models.classification import Classification
 from backend.models.draft import Draft
-from backend.models.email import Email
 from backend.schemas.stats_schemas import (
     CategoryCountItem,
     CategoryDistributionResponse,
@@ -36,7 +35,7 @@ def get_overview_stats(db: Session = Depends(get_db)) -> OverviewStatsResponse:
     Time saved formula: ``(drafts_created × 5) − (sum(llm_total_time_ms) / 60000)`` minutes.
     """
     total_processed = db.scalar(
-        select(func.count()).select_from(Email).where(Email.is_processed.is_(True))
+        select(func.coalesce(func.sum(AgentRun.total_emails_processed), 0))
     ) or 0
 
     urgent_count = db.scalar(

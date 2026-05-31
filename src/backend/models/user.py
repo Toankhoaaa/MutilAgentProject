@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.sqltypes import Uuid
 
 from backend.models.base import Base
@@ -34,8 +34,4 @@ class User(Base):
         onupdate=func.now(),
     )
 
-    emails: Mapped[list["Email"]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-    )
 

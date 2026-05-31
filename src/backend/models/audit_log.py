@@ -21,11 +21,7 @@ class AuditLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"), nullable=True)
-    email_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid,
-        ForeignKey("emails.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    email_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     agent_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     action: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)

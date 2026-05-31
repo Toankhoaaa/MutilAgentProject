@@ -172,11 +172,7 @@ class GmailService:
             self._service = await asyncio.to_thread(self.authenticate)
         return self._service
 
-    async def fetch_unread_emails(
-        self,
-        limit: int = 10,
-        mark_as_read: bool = True,
-    ) -> list[dict[str, Any]]:
+    async def fetch_unread_emails(self, limit: int = 10) -> list[dict[str, Any]]:
         """Fetch unread messages from the authenticated mailbox."""
         service = await self.get_service()
         try:
@@ -205,11 +201,7 @@ class GmailService:
                 logger.error("Failed to fetch Gmail message %s: %s", message_id, exc)
                 continue
 
-            parsed = self._parse_message(full_message)
-            results.append(parsed)
-
-            if mark_as_read:
-                await self._mark_message_as_read(service, message_id)
+            results.append(self._parse_message(full_message))
 
         return results
 
@@ -301,22 +293,6 @@ class GmailService:
     async def star_message(self, message_id: str) -> dict[str, Any]:
         """Star a message by adding the ``STARRED`` label."""
         return await self.modify_message_labels(message_id, add_labels=["STARRED"])
-
-    async def _mark_message_as_read(self, service: Any, message_id: str) -> None:
-        """Remove the UNREAD label to avoid duplicate processing."""
-        try:
-            await asyncio.to_thread(
-                lambda: service.users()
-                .messages()
-                .modify(
-                    userId="me",
-                    id=message_id,
-                    body={"removeLabelIds": ["UNREAD"]},
-                )
-                .execute()
-            )
-        except HttpError as exc:
-            logger.warning("Failed to mark message %s as read: %s", message_id, exc)
 
     def _parse_message(self, message: dict[str, Any]) -> dict[str, Any]:
         """Parse a Gmail API message resource into a normalized dictionary."""

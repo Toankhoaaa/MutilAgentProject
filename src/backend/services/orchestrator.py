@@ -17,7 +17,6 @@ from backend.models.audit_log import AuditLog
 from backend.models.classification import Classification
 from backend.models.configuration import Configuration
 from backend.models.draft import Draft
-from backend.models.email import Email
 from backend.models.processing_queue import ProcessingQueue
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput
@@ -50,22 +49,14 @@ class EmailOrchestrator:
         classifier_agent: EmailClassifierAgent,
         response_agent: EmailResponseAgent,
         user_id: uuid.UUID | None = None,
+        raw_emails: list[dict[str, Any]] | None = None,
     ) -> None:
-        """
-        Initialize the orchestrator with injected dependencies.
-
-        Args:
-            db: SQLAlchemy database session.
-            gmail_service: Gmail API service instance.
-            classifier_agent: Email classification agent.
-            response_agent: Email response drafting agent.
-            user_id: Optional mailbox owner; resolved from DB when omitted.
-        """
         self._db = db
         self._gmail = gmail_service
         self._classifier = classifier_agent
         self._response = response_agent
         self._user_id = user_id
+        self._raw_emails: list[dict[str, Any]] = raw_emails or []
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
@@ -102,7 +93,7 @@ class EmailOrchestrator:
             summary["run_id"] = str(agent_run.id)
             self._db.commit()
 
-            raw_emails = await self._gmail.fetch_unread_emails(limit=limit)
+            raw_emails: list[dict[str, Any]] = self._raw_emails or []
             summary["fetched"] = len(raw_emails)
 
             self._audit(
@@ -117,46 +108,17 @@ class EmailOrchestrator:
 
             for raw_email in raw_emails:
                 gmail_message_id = raw_email.get("gmail_message_id", "")
-                email_record_id: uuid.UUID | None = None
+                email_id = uuid.uuid4()
 
                 try:
-                    if self._email_exists(gmail_message_id, user_id):
-                        summary["skipped_duplicate"] += 1
-                        self._audit(
-                            user_id=user_id,
-                            email_id=None,
-                            agent_name=_AGENT_ORCHESTRATOR,
-                            action="skip_duplicate",
-                            status="skipped",
-                            details={"gmail_message_id": gmail_message_id},
-                        )
-                        self._db.commit()
-                        continue
-
-                    email_record = self._save_email(user_id, raw_email)
-                    self._db.flush()
-                    email_record_id = email_record.id
-
-                    self._audit(
-                        user_id=user_id,
-                        email_id=email_record_id,
-                        agent_name=_AGENT_ORCHESTRATOR,
-                        action="save_email",
-                        status="success",
-                        details={
-                            "gmail_message_id": gmail_message_id,
-                            "subject": raw_email.get("subject"),
-                        },
-                    )
-
                     classification_output, classify_ms = await self._classify_email(raw_email)
                     llm_calls_count += 1
                     llm_total_time_ms += classify_ms or 0
-                    self._save_classification(email_record_id, classification_output, classify_ms)
+                    self._save_classification(email_id, classification_output, classify_ms)
 
                     self._audit(
                         user_id=user_id,
-                        email_id=email_record_id,
+                        email_id=email_id,
                         agent_name=_AGENT_CLASSIFIER,
                         action="classify_email",
                         status="success",
@@ -171,7 +133,7 @@ class EmailOrchestrator:
                         await manager.broadcast(
                             {
                                 "type": "NEW_URGENT_EMAIL",
-                                "subject": raw_email.get("subject") or email_record.subject,
+                                "subject": raw_email.get("subject"),
                                 "summary": classification_output.summary,
                             }
                         )
@@ -179,7 +141,7 @@ class EmailOrchestrator:
                     if EmailResponseAgent.is_eligible(classification_output.category):
                         draft_gmail_id, draft_ms = await self._draft_and_save(
                             user_id=user_id,
-                            email_record=email_record,
+                            email_id=email_id,
                             raw_email=raw_email,
                             classification=classification_output,
                         )
@@ -188,7 +150,7 @@ class EmailOrchestrator:
                         summary["drafts_created"] += 1
                         self._audit(
                             user_id=user_id,
-                            email_id=email_record_id,
+                            email_id=email_id,
                             agent_name=_AGENT_RESPONSE,
                             action="create_draft",
                             status="success",
@@ -200,22 +162,12 @@ class EmailOrchestrator:
                     else:
                         self._audit(
                             user_id=user_id,
-                            email_id=email_record_id,
+                            email_id=email_id,
                             agent_name=_AGENT_ORCHESTRATOR,
                             action="skip_auto_reply",
                             status="skipped",
                             details={"category": classification_output.category.value},
                         )
-
-                    self._mark_email_processed(email_record)
-                    self._audit(
-                        user_id=user_id,
-                        email_id=email_record_id,
-                        agent_name=_AGENT_ORCHESTRATOR,
-                        action="mark_processed",
-                        status="success",
-                        details={"gmail_message_id": gmail_message_id},
-                    )
 
                     self._db.commit()
                     summary["processed"] += 1
@@ -230,7 +182,7 @@ class EmailOrchestrator:
 
                     self._audit(
                         user_id=user_id,
-                        email_id=email_record_id,
+                        email_id=email_id,
                         agent_name=_AGENT_ORCHESTRATOR,
                         action="process_email",
                         status="failed",
@@ -321,37 +273,6 @@ class EmailOrchestrator:
         logger.warning("Created bootstrap user %s for orchestrator processing.", bootstrap.email)
         return bootstrap.id
 
-    def _email_exists(self, gmail_message_id: str, user_id: uuid.UUID) -> bool:
-        """Check whether this user already has the Gmail message id stored."""
-        if not gmail_message_id:
-            return False
-        existing = self._db.scalar(
-            select(Email.id).where(
-                Email.gmail_message_id == gmail_message_id,
-                Email.user_id == user_id,
-            )
-        )
-        return existing is not None
-
-    def _save_email(self, user_id: uuid.UUID, raw_email: dict[str, Any]) -> Email:
-        """Persist a new email record from a parsed Gmail payload."""
-        received_at = self._parse_received_at(raw_email.get("date"))
-
-        email_record = Email(
-            user_id=user_id,
-            gmail_message_id=raw_email["gmail_message_id"],
-            thread_id=raw_email.get("thread_id"),
-            sender=raw_email.get("sender"),
-            recipient=raw_email.get("recipient"),
-            subject=raw_email.get("subject"),
-            body=raw_email.get("body") or raw_email.get("snippet"),
-            body_html=raw_email.get("body_html"),
-            received_at=received_at,
-            is_processed=False,
-        )
-        self._db.add(email_record)
-        return email_record
-
     async def _classify_email(
         self,
         raw_email: dict[str, Any],
@@ -421,16 +342,10 @@ class EmailOrchestrator:
     async def _draft_and_save(
         self,
         user_id: uuid.UUID,
-        email_record: Email,
+        email_id: uuid.UUID,
         raw_email: dict[str, Any],
         classification: EmailClassificationOutput,
     ) -> tuple[str, int]:
-        """
-        Compose an AI reply, push a Gmail draft, and persist the draft record.
-
-        Returns:
-            Tuple of Gmail draft id and elapsed processing time in milliseconds.
-        """
         started = time.monotonic()
         tone, signature = self._load_agent_customization()
 
@@ -455,7 +370,7 @@ class EmailOrchestrator:
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         draft_record = Draft(
-            email_id=email_record.id,
+            email_id=email_id,
             draft_content=reply.body_content,
             draft_gmail_id=draft_gmail_id,
             subject=reply.subject,
@@ -467,7 +382,7 @@ class EmailOrchestrator:
 
         self._audit(
             user_id=user_id,
-            email_id=email_record.id,
+            email_id=email_id,
             agent_name=_AGENT_RESPONSE,
             action="compose_reply",
             status="success",
@@ -484,11 +399,6 @@ class EmailOrchestrator:
         tone = (tone_row.value if tone_row and tone_row.value else _DEFAULT_AGENT_TONE)
         signature = (signature_row.value if signature_row and signature_row.value else "")
         return tone, signature
-
-    def _mark_email_processed(self, email_record: Email) -> None:
-        """Set processed flags on the email record."""
-        email_record.is_processed = True
-        email_record.processed_at = datetime.now(timezone.utc)
 
     def _audit(
         self,
@@ -540,19 +450,6 @@ class EmailOrchestrator:
             processed_at=datetime.now(timezone.utc),
         )
         self._db.add(queue_item)
-
-    @staticmethod
-    def _parse_received_at(date_value: str | None) -> datetime | None:
-        """Parse Gmail date string into a timezone-aware datetime."""
-        if not date_value:
-            return None
-        try:
-            parsed = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed
-        except ValueError:
-            return None
 
     @staticmethod
     def _parse_deadline(deadline: str | date | None) -> date | None:
