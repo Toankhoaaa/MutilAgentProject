@@ -60,6 +60,7 @@ logs/
 
 # Frontend (Next.js)
 src/frontend/node_modules/
+src/extension/node_modules/
 src/frontend/.next/
 src/frontend/out/
 src/frontend/build/
