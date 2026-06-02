@@ -76,6 +76,9 @@ Constraints:
 
 {few_shot}
 
+Relevant knowledge base context (use to improve reply accuracy; empty if unavailable):
+{rag_context}
+
 Classification context:
 - Category: {email_category}
 - Priority score (1-5): {priority_score}
@@ -174,6 +177,7 @@ class EmailResponseAgent:
         classification: EmailClassificationOutput,
         tone: str = "professional",
         signature: str = "",
+        rag_context: str = "",
     ) -> EmailResponseOutput:
         """
         Compose a reply draft for an eligible email.
@@ -205,6 +209,7 @@ class EmailResponseAgent:
                 classification,
                 tone,
                 signature,
+                rag_context,
             )
         except (ResponseParseError, ResponseAgentError, LLMServiceError) as exc:
             logger.warning("CrewAI response drafting failed, using GeminiService fallback: %s", exc)
@@ -214,6 +219,7 @@ class EmailResponseAgent:
                 classification,
                 tone,
                 signature,
+                rag_context,
             )
 
     async def draft_reply(
@@ -223,6 +229,7 @@ class EmailResponseAgent:
         classification: EmailClassificationOutput,
         tone: str = "professional",
         signature: str = "",
+        rag_context: str = "",
     ) -> EmailResponseOutput:
         """Alias for ``compose_reply`` used by the orchestrator pipeline."""
         return await self.compose_reply(
@@ -231,6 +238,7 @@ class EmailResponseAgent:
             classification=classification,
             tone=tone,
             signature=signature,
+            rag_context=rag_context,
         )
 
     def _compose_with_crew(
@@ -240,12 +248,14 @@ class EmailResponseAgent:
         classification: EmailClassificationOutput,
         tone: str,
         signature: str,
+        rag_context: str = "",
     ) -> EmailResponseOutput:
         """Run the CrewAI response workflow synchronously."""
         try:
             result = self._crew.kickoff(
                 inputs={
                     "few_shot": _RESPONSE_FEW_SHOT,
+                    "rag_context": rag_context or "(none)",
                     "email_subject": email_subject,
                     "email_body": email_body,
                     "email_summary": classification.summary,
@@ -268,10 +278,12 @@ class EmailResponseAgent:
         classification: EmailClassificationOutput,
         tone: str,
         signature: str,
+        rag_context: str = "",
     ) -> EmailResponseOutput:
         """Fallback reply drafting via structured Gemini output."""
         prompt = _RESPONSE_TASK_TEMPLATE.format(
             few_shot=_RESPONSE_FEW_SHOT,
+            rag_context=rag_context or "(none)",
             email_subject=email_subject,
             email_body=email_body,
             email_summary=classification.summary,

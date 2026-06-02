@@ -16,4 +16,5 @@ httpx
 authlib
 itsdangerous
 apscheduler
+chromadb
 pytest

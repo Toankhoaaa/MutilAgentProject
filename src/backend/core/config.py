@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Optional override; leave empty to derive from request host (recommended for local dev).
     GOOGLE_OAUTH_REDIRECT_URI: str = ""
     FRONTEND_URL: str = "http://localhost:3000"
+    CHROMA_PERSIST_PATH: str = "./chroma_db"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

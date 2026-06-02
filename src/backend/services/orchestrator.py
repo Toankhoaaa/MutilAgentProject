@@ -22,6 +22,7 @@ from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput
 from backend.services.agents.classifier_agent import EmailClassifierAgent
 from backend.services.agents.privacy_agent import PrivacyAgent
+from backend.services.agents.rag_agent import RagAgent
 from backend.services.agents.response_agent import EmailResponseAgent
 from backend.services.gmail_service import GmailService
 
@@ -52,6 +53,7 @@ class EmailOrchestrator:
         user_id: uuid.UUID | None = None,
         raw_emails: list[dict[str, Any]] | None = None,
         privacy_agent: PrivacyAgent | None = None,
+        rag_agent: RagAgent | None = None,
     ) -> None:
         self._db = db
         self._gmail = gmail_service
@@ -60,6 +62,7 @@ class EmailOrchestrator:
         self._user_id = user_id
         self._raw_emails: list[dict[str, Any]] = raw_emails or []
         self._privacy = privacy_agent or PrivacyAgent()
+        self._rag = rag_agent or RagAgent()
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
@@ -143,11 +146,15 @@ class EmailOrchestrator:
                         )
 
                     if EmailResponseAgent.is_eligible(classification_output.category):
+                        rag_context = self._rag.retrieve(
+                            raw_email.get("body") or raw_email.get("snippet") or ""
+                        )
                         draft_gmail_id, draft_ms = await self._draft_and_save(
                             user_id=user_id,
                             email_id=email_id,
                             raw_email=raw_email,
                             classification=classification_output,
+                            rag_context=rag_context,
                         )
                         llm_calls_count += 1
                         llm_total_time_ms += draft_ms or 0
@@ -273,12 +280,16 @@ class EmailOrchestrator:
 
         if EmailResponseAgent.is_eligible(classification.category):
             tone, signature = self._load_agent_customization()
+            rag_context = self._rag.retrieve(
+                raw_email.get("body") or raw_email.get("snippet") or ""
+            )
             reply = await self._response.draft_reply(
                 email_subject=raw_email.get("subject") or "",
                 email_body=raw_email.get("body") or "",
                 classification=classification,
                 tone=tone,
                 signature=signature,
+                rag_context=rag_context,
             )
             result["draft_content"] = reply.body_content
             result["draft_subject"] = reply.subject
@@ -378,6 +389,7 @@ class EmailOrchestrator:
         email_id: uuid.UUID,
         raw_email: dict[str, Any],
         classification: EmailClassificationOutput,
+        rag_context: str = "",
     ) -> tuple[str, int]:
         started = time.monotonic()
         tone, signature = self._load_agent_customization()
@@ -388,6 +400,7 @@ class EmailOrchestrator:
             classification=classification,
             tone=tone,
             signature=signature,
+            rag_context=rag_context,
         )
 
         sender = raw_email.get("sender") or ""
