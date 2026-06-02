@@ -320,3 +320,22 @@ class EmailActionResponse(BaseModel):
     email_id: UUID
     gmail_message_id: str
     labels: list[str] | None = None
+
+
+class ProcessEmailRequest(BaseModel):
+    """Raw email text submitted for stateless classification and draft generation."""
+
+    text: str = Field(..., min_length=1, description="Email body text.")
+    subject: str = Field(default="", description="Email subject line.")
+    sender: str = Field(default="", description="Sender email address.")
+
+
+class ProcessEmailResult(BaseModel):
+    """Classification and optional draft returned synchronously without DB persistence."""
+
+    category: str
+    priority_score: int
+    summary: str
+    confidence: float
+    draft_content: str | None = None
+    draft_subject: str | None = None

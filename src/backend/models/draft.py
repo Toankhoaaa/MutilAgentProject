@@ -3,8 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, Index, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.sqltypes import Uuid
 
 from backend.models.base import Base
@@ -18,12 +18,7 @@ class Draft(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    email_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        ForeignKey("emails.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
+    email_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True)
     draft_content: Mapped[str] = mapped_column(Text, nullable=False)
     draft_gmail_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -43,5 +38,4 @@ class Draft(Base):
         onupdate=func.now(),
     )
 
-    email: Mapped["Email"] = relationship(back_populates="draft")
 

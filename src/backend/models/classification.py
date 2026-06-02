@@ -3,8 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, Float, ForeignKey, Index, JSON, SmallInteger, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, Date, Float, Index, JSON, SmallInteger, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.sqltypes import Uuid
 
 from backend.models.base import Base
@@ -18,12 +18,7 @@ class Classification(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    email_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        ForeignKey("emails.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
+    email_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     priority_score: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -37,5 +32,4 @@ class Classification(Base):
         server_default=func.now(),
     )
 
-    email: Mapped["Email"] = relationship(back_populates="classification")
 
