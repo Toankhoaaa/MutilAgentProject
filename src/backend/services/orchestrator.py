@@ -21,6 +21,7 @@ from backend.models.processing_queue import ProcessingQueue
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput
 from backend.services.agents.classifier_agent import EmailClassifierAgent
+from backend.services.agents.privacy_agent import PrivacyAgent
 from backend.services.agents.response_agent import EmailResponseAgent
 from backend.services.gmail_service import GmailService
 
@@ -50,6 +51,7 @@ class EmailOrchestrator:
         response_agent: EmailResponseAgent,
         user_id: uuid.UUID | None = None,
         raw_emails: list[dict[str, Any]] | None = None,
+        privacy_agent: PrivacyAgent | None = None,
     ) -> None:
         self._db = db
         self._gmail = gmail_service
@@ -57,6 +59,7 @@ class EmailOrchestrator:
         self._response = response_agent
         self._user_id = user_id
         self._raw_emails: list[dict[str, Any]] = raw_emails or []
+        self._privacy = privacy_agent or PrivacyAgent()
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
@@ -111,6 +114,7 @@ class EmailOrchestrator:
                 email_id = uuid.uuid4()
 
                 try:
+                    raw_email = self._privacy.mask_email_dict(raw_email)
                     classification_output, classify_ms = await self._classify_email(raw_email)
                     llm_calls_count += 1
                     llm_total_time_ms += classify_ms or 0
@@ -256,6 +260,7 @@ class EmailOrchestrator:
         self, raw_email: dict[str, Any]
     ) -> dict[str, Any]:
         """Classify a single email and optionally draft a reply with no DB writes."""
+        raw_email = self._privacy.mask_email_dict(raw_email)
         classification, _ = await self._classify_email(raw_email)
         result: dict[str, Any] = {
             "category": classification.category.value,
