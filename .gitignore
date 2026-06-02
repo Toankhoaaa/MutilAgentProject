@@ -73,3 +73,4 @@ src/email_orchestrator.db-journal
 ARCHITECTURE.md
 .codegraph/daemon.pid
 .gitmodules
+.codegraph
