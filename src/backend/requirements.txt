@@ -17,4 +17,7 @@ authlib
 itsdangerous
 apscheduler
 chromadb
+PyPDF2
+python-docx
+python-multipart
 pytest

@@ -1,5 +1,6 @@
 """API router package."""
 
+from backend.api.routers.admin import router as admin_router
 from backend.api.routers.agents import router as agents_router
 from backend.api.routers.audit import router as audit_router
 from backend.api.routers.auth import router as auth_router
@@ -10,6 +11,7 @@ from backend.api.routers.stats import router as stats_router
 from backend.api.routers.websockets import router as websockets_router
 
 __all__ = [
+    "admin_router",
     "emails_router",
     "auth_router",
     "agents_router",
