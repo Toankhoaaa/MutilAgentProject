@@ -1,0 +1,1 @@
+import '@inboxsdk/core/background';

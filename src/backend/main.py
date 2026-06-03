@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from backend.api import (
+    admin_router,
     agents_router,
     audit_router,
     auth_router,
@@ -82,13 +83,14 @@ app = FastAPI(
 # allow_origins=["*"] + allow_credentials=True is rejected by browsers; use explicit origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],
+    allow_origins=[settings.FRONTEND_URL, "https://mail.google.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 
+app.include_router(admin_router, prefix=API_V1_PREFIX)
 app.include_router(auth_router, prefix=API_V1_PREFIX)
 app.include_router(emails_router, prefix=API_V1_PREFIX)
 app.include_router(agents_router, prefix=API_V1_PREFIX)

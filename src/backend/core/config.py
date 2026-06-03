@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     GMAIL_TOKEN_PATH: str = "token.json"
     GMAIL_MOCK_MODE: bool = False
     GMAIL_IMPERSONATE_USER: str = ""
-    JWT_SECRET_KEY: str = "dev-change-me-in-production"
+    JWT_SECRET_KEY: str = "dev-change-me-in-production-32b!"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7
     GOOGLE_CLIENT_ID: str = ""
@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Optional override; leave empty to derive from request host (recommended for local dev).
     GOOGLE_OAUTH_REDIRECT_URI: str = ""
     FRONTEND_URL: str = "http://localhost:3000"
+    CHROMA_PERSIST_PATH: str = "./chroma_db"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

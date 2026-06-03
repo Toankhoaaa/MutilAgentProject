@@ -15,8 +15,10 @@ from sqlalchemy.orm import Session
 
 from backend.core.config import settings
 from backend.core.database import get_db
+from backend.core.security import create_access_token
 from backend.models.user import User
-from backend.schemas.api_schemas import UserProfileResponse
+from backend.schemas.api_schemas import TokenResponse, UserProfileResponse
+
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +147,27 @@ async def callback(
     request.session["user_id"] = str(user.id)
     dashboard_url = f"{settings.FRONTEND_URL.rstrip('/')}/dashboard"
     return RedirectResponse(url=dashboard_url, status_code=status.HTTP_302_FOUND)
+
+
+@router.get("/token", response_model=TokenResponse)
+def get_token(request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    """Issue a signed JWT for the currently authenticated session (used by the browser extension)."""
+    user_id_raw = request.session.get("user_id")
+    if not user_id_raw:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated.")
+    try:
+        user_id = UUID(str(user_id_raw))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session.") from exc
+    user = db.get(User, user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive.")
+    token = create_access_token(user_id=user.id, email=user.email)
+    return TokenResponse(
+        access_token=token,
+        expires_in_minutes=settings.JWT_EXPIRE_MINUTES,
+        user=UserProfileResponse.model_validate(user),
+    )
 
 
 @router.get("/me", response_model=UserProfileResponse)

@@ -36,11 +36,22 @@ const ChartIcon = () => (
   </svg>
 );
 
+const DatabaseIcon = () => (
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+      d="M4 7c0-1.657 3.582-3 8-3s8 1.343 8 3M4 7v5c0 1.657 3.582 3 8 3s8-1.343 8-3V7M4 12v5c0 1.657 3.582 3 8 3s8-1.343 8-3v-5" />
+  </svg>
+);
+
 const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: <LayoutGridIcon /> },
   { href: "/dashboard#emails", label: "Emails", icon: <MailIcon /> },
   { href: "/dashboard#agents", label: "Agent Status", icon: <CpuIcon /> },
   { href: "/dashboard#analytics", label: "Analytics", icon: <ChartIcon /> },
+];
+
+const adminNavItems: NavItem[] = [
+  { href: "/admin/knowledge-base", label: "Knowledge Base", icon: <DatabaseIcon /> },
 ];
 
 interface SidebarProps {
@@ -71,6 +82,20 @@ export default function Sidebar({ user }: SidebarProps) {
         <p className="sidebar-section-label">Main Menu</p>
         {navItems.map((item) => {
           const isActive = router.pathname === item.href.split("#")[0];
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`sidebar-item ${isActive ? "sidebar-item-active" : ""}`}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
+        <p className="sidebar-section-label mt-4">Admin</p>
+        {adminNavItems.map((item) => {
+          const isActive = router.pathname === item.href;
           return (
             <Link
               key={item.href}
