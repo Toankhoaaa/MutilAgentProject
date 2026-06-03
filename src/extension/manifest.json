@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "AI Reply - Gmail Assistant",
+  "version": "0.1.0",
+  "description": "Injects an AI Reply button into Gmail compose using InboxSDK.",
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "AI Reply Settings"
+  },
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://mail.google.com/*", "http://localhost:8000/*"],
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["pageWorld.js", "assets/*"],
+      "matches": ["https://mail.google.com/*"]
+    }
+  ]
+}

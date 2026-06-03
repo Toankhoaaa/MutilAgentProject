@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     GMAIL_TOKEN_PATH: str = "token.json"
     GMAIL_MOCK_MODE: bool = False
     GMAIL_IMPERSONATE_USER: str = ""
-    JWT_SECRET_KEY: str = "dev-change-me-in-production"
+    JWT_SECRET_KEY: str = "dev-change-me-in-production-32b!"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7
     GOOGLE_CLIENT_ID: str = ""
