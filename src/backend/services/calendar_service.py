@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from google.auth.transport.requests import Request
@@ -18,6 +19,16 @@ CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 
 # Vietnam Standard Time (no DST — always UTC+7).
 _VN_TZ = "Asia/Ho_Chi_Minh"
+_VN_OFFSET = timezone(timedelta(hours=7))
+
+
+def _to_rfc3339(dt: datetime) -> str:
+    """Return dt as RFC 3339 string with +07:00 offset; naive datetimes assumed VN time."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_VN_OFFSET)
+    else:
+        dt = dt.astimezone(_VN_OFFSET)
+    return dt.isoformat()
 
 
 class CalendarServiceError(Exception):
@@ -145,6 +156,33 @@ class GoogleCalendarService:
                 end_time,
             )
         return is_free
+
+    async def check_free_busy(self, start_time: datetime, end_time: datetime) -> bool:
+        """
+        Check whether the authenticated user is free in the given time window.
+
+        Typed variant of :meth:`check_availability` that accepts ``datetime``
+        objects instead of raw strings.  Naive datetimes are treated as
+        ``Asia/Ho_Chi_Minh`` (+07:00); aware datetimes are converted to that
+        timezone before the API call.
+
+        Args:
+            start_time: Meeting start (timezone-naive or aware).
+            end_time:   Meeting end (timezone-naive or aware).
+
+        Returns:
+            ``True`` when the user is free; ``False`` when at least one
+            existing event overlaps the requested window.
+
+        Raises:
+            ValueError: When ``start_time`` is not strictly before ``end_time``.
+            CalendarAPIError: When the Freebusy API call fails.
+        """
+        if start_time >= end_time:
+            raise ValueError(
+                f"start_time must be before end_time: {start_time!r} >= {end_time!r}"
+            )
+        return await self.check_availability(_to_rfc3339(start_time), _to_rfc3339(end_time))
 
     async def create_event(
         self,
