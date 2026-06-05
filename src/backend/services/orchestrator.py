@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -19,11 +20,13 @@ from backend.models.configuration import Configuration
 from backend.models.draft import Draft
 from backend.models.processing_queue import ProcessingQueue
 from backend.models.user import User
-from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput
+from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput
 from backend.services.agents.classifier_agent import EmailClassifierAgent
 from backend.services.agents.privacy_agent import PrivacyAgent
 from backend.services.agents.rag_agent import RagAgent
 from backend.services.agents.response_agent import EmailResponseAgent
+from backend.services.agents.scheduling_agent import EmailSchedulingAgent
+from backend.services.calendar_service import CalendarAPIError, GoogleCalendarService
 from backend.services.gmail_service import GmailService
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,7 @@ logger = logging.getLogger(__name__)
 _AGENT_ORCHESTRATOR = "EmailOrchestrator"
 _AGENT_CLASSIFIER = "ClassifierAgent"
 _AGENT_RESPONSE = "ResponseAgent"
+_AGENT_SCHEDULING = "SchedulingAgent"
 _CONFIG_KEY_AGENT_TONE = "agent_tone"
 _CONFIG_KEY_USER_SIGNATURE = "user_signature"
 _DEFAULT_AGENT_TONE = "professional"
@@ -54,6 +58,8 @@ class EmailOrchestrator:
         raw_emails: list[dict[str, Any]] | None = None,
         privacy_agent: PrivacyAgent | None = None,
         rag_agent: RagAgent | None = None,
+        scheduling_agent: EmailSchedulingAgent | None = None,
+        calendar_service: GoogleCalendarService | None = None,
     ) -> None:
         self._db = db
         self._gmail = gmail_service
@@ -63,6 +69,8 @@ class EmailOrchestrator:
         self._raw_emails: list[dict[str, Any]] = raw_emails or []
         self._privacy = privacy_agent or PrivacyAgent()
         self._rag = rag_agent or RagAgent()
+        self._scheduling = scheduling_agent
+        self._calendar = calendar_service
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
@@ -80,6 +88,8 @@ class EmailOrchestrator:
             "skipped_duplicate": 0,
             "failed": 0,
             "drafts_created": 0,
+            "scheduled_events": [],
+            "scheduling_conflicts": [],
             "errors": [],
             "run_id": None,
             "llm_calls_count": 0,
@@ -135,6 +145,22 @@ class EmailOrchestrator:
                             "confidence": classification_output.confidence,
                         },
                     )
+
+                    scheduling_result = await self._handle_scheduling(raw_email, email_id, user_id)
+                    if scheduling_result:
+                        status = scheduling_result["status"]
+                        if status == "scheduled":
+                            summary["scheduled_events"].append(
+                                {"email_id": str(email_id), **scheduling_result["payload"]}
+                            )
+                        elif status == "conflict":
+                            summary["scheduling_conflicts"].append(
+                                {
+                                    "email_id": str(email_id),
+                                    "alternatives": scheduling_result.get("alternatives", []),
+                                }
+                            )
+                        self._db.commit()
 
                     if classification_output.category == EmailCategory.URGENT:
                         await manager.broadcast(
@@ -295,6 +321,133 @@ class EmailOrchestrator:
             result["draft_subject"] = reply.subject
 
         return result
+
+    async def _handle_scheduling(
+        self,
+        raw_email: dict[str, Any],
+        email_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> dict[str, Any] | None:
+        """
+        Run the scheduling sub-pipeline for one email.
+
+        Returns a dict with "status" and either "payload" (free slot) or
+        "alternatives" (conflict), or None when the email is not a meeting
+        request or scheduling integration is not configured.
+        """
+        if self._scheduling is None or self._calendar is None:
+            return None
+
+        subject = raw_email.get("subject") or ""
+        body = raw_email.get("body") or raw_email.get("snippet") or ""
+        sender = raw_email.get("sender") or ""
+
+        try:
+            sched_output: SchedulingOutput = await asyncio.wait_for(
+                self._scheduling.extract_schedule(subject, body, sender),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Scheduling extraction timed out for email %s", email_id)
+            return None
+        except Exception as exc:
+            logger.warning("Scheduling extraction failed for email %s: %s", email_id, exc)
+            return None
+
+        if not sched_output.is_meeting_request or sched_output.action is None:
+            return None
+
+        action = sched_output.action
+        self._audit(
+            user_id=user_id,
+            email_id=email_id,
+            agent_name=_AGENT_SCHEDULING,
+            action="extract_schedule",
+            status="success",
+            details={
+                "start_datetime": sched_output.start_datetime,
+                "end_datetime": sched_output.end_datetime,
+                "event_summary": sched_output.event_summary,
+            },
+        )
+
+        try:
+            is_free: bool = await asyncio.wait_for(
+                self._calendar.check_free_busy(action.start_time, action.end_time),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Calendar free/busy check timed out for email %s", email_id)
+            self._audit(
+                user_id=user_id,
+                email_id=email_id,
+                agent_name=_AGENT_SCHEDULING,
+                action="check_free_busy",
+                status="timeout",
+                details=None,
+            )
+            return {"status": "timeout"}
+        except CalendarAPIError as exc:
+            logger.warning("Calendar API error for email %s: %s", email_id, exc)
+            self._audit(
+                user_id=user_id,
+                email_id=email_id,
+                agent_name=_AGENT_SCHEDULING,
+                action="check_free_busy",
+                status="error",
+                details={"error": str(exc)},
+            )
+            return {"status": "calendar_error", "error": str(exc)}
+
+        if is_free:
+            payload = {
+                "summary": sched_output.event_summary or subject,
+                "start_time": action.start_time.isoformat(),
+                "end_time": action.end_time.isoformat(),
+                "attendees": action.attendees,
+                "description": sched_output.suggested_reply,
+            }
+            self._audit(
+                user_id=user_id,
+                email_id=email_id,
+                agent_name=_AGENT_SCHEDULING,
+                action="slot_available",
+                status="success",
+                details={"start_time": payload["start_time"], "end_time": payload["end_time"]},
+            )
+            return {"status": "scheduled", "payload": payload}
+
+        # Slot is busy — ask for 3 alternatives.
+        self._audit(
+            user_id=user_id,
+            email_id=email_id,
+            agent_name=_AGENT_SCHEDULING,
+            action="slot_conflict",
+            status="conflict",
+            details={
+                "start_time": action.start_time.isoformat(),
+                "end_time": action.end_time.isoformat(),
+            },
+        )
+
+        try:
+            alternatives = await asyncio.wait_for(
+                self._scheduling.suggest_alternatives(
+                    email_subject=subject,
+                    email_body=body,
+                    busy_start=action.start_time,
+                    busy_end=action.end_time,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Alternative slot suggestion timed out for email %s", email_id)
+            alternatives = []
+        except Exception as exc:
+            logger.warning("Alternative slot suggestion failed for email %s: %s", email_id, exc)
+            alternatives = []
+
+        return {"status": "conflict", "alternatives": alternatives}
 
     def _resolve_user_id(self) -> uuid.UUID:
         """Return the configured or first active user id for mailbox ownership."""

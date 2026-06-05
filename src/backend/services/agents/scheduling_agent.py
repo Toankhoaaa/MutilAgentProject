@@ -166,6 +166,28 @@ Body:
 {email_body}
 """.strip()
 
+_ALTERNATIVES_PROMPT_TEMPLATE = """\
+Current time (Asia/Ho_Chi_Minh): {current_time}
+
+The requested meeting slot {busy_start} – {busy_end} is already occupied by an existing calendar event.
+
+Email subject: {email_subject}
+Email body:
+{email_body}
+
+Suggest exactly 3 alternative meeting times that:
+- Fall within the next 5 business days (Mon–Fri, 08:00–18:00 Vietnam time)
+- Do not conflict with the busy slot above
+- Match the original meeting duration (default 60 min if unspecified)
+
+Respond with a JSON array only — no prose, no markdown fences:
+[
+  {{"start": "YYYY-MM-DDTHH:MM:SS+07:00", "end": "YYYY-MM-DDTHH:MM:SS+07:00"}},
+  {{"start": "YYYY-MM-DDTHH:MM:SS+07:00", "end": "YYYY-MM-DDTHH:MM:SS+07:00"}},
+  {{"start": "YYYY-MM-DDTHH:MM:SS+07:00", "end": "YYYY-MM-DDTHH:MM:SS+07:00"}}
+]
+""".strip()
+
 
 class SchedulingAgentError(Exception):
     """Base exception for scheduling agent failures."""
@@ -268,6 +290,44 @@ class EmailSchedulingAgent:
                 "CrewAI scheduling extraction failed, using GeminiService fallback: %s", exc
             )
             return await self._extract_with_gemini(email_subject, email_body, sender, now)
+
+    async def suggest_alternatives(
+        self,
+        email_subject: str,
+        email_body: str,
+        busy_start: datetime,
+        busy_end: datetime,
+    ) -> list[dict[str, str]]:
+        """
+        Return up to 3 alternative meeting slots after a scheduling conflict.
+
+        Args:
+            email_subject: Original email subject for context.
+            email_body:    Original email body for context.
+            busy_start:    Start of the conflicting time slot.
+            busy_end:      End of the conflicting time slot.
+
+        Returns:
+            List of dicts with "start" and "end" ISO 8601 strings (up to 3 items).
+            Returns an empty list if the model cannot produce valid alternatives.
+        """
+        prompt = _ALTERNATIVES_PROMPT_TEMPLATE.format(
+            current_time=_current_time_vn(),
+            busy_start=busy_start.isoformat(),
+            busy_end=busy_end.isoformat(),
+            email_subject=email_subject,
+            email_body=email_body,
+        )
+        try:
+            raw = await self._gemini_service.generate_text(prompt, temperature=0.4)
+            slots = json.loads(self._extract_json_array(raw))
+            return [
+                s for s in slots[:3]
+                if isinstance(s, dict) and "start" in s and "end" in s
+            ]
+        except Exception as exc:
+            logger.warning("suggest_alternatives failed: %s", exc)
+            return []
 
     # ── Internal: CrewAI path ─────────────────────────────────────────────
 
@@ -392,6 +452,19 @@ class EmailSchedulingAgent:
             raise SchedulingParseError(
                 f"Unable to parse CrewAI scheduling output: {exc}"
             ) from exc
+
+    @staticmethod
+    def _extract_json_array(raw_text: str) -> str:
+        """Extract the first JSON array from a raw model output string."""
+        text = raw_text.strip()
+        fence_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+        if fence_match:
+            return fence_match.group(1)
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("No JSON array found in model output.")
+        return text[start : end + 1]
 
     @staticmethod
     def _extract_json_object(raw_text: str) -> dict[str, Any]:
