@@ -79,3 +79,4 @@ src/extension/package.json
 src/email_orchestrator.db-journal
 DESIGN-vercel.md
 .gitignore
+src/frontend/Design System (standalone).html
