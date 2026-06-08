@@ -18,6 +18,7 @@ from backend.models.audit_log import AuditLog
 from backend.models.classification import Classification
 from backend.models.configuration import Configuration
 from backend.models.draft import Draft
+from backend.models.email import Email
 from backend.models.processing_queue import ProcessingQueue
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput
@@ -109,7 +110,12 @@ class EmailOrchestrator:
             summary["run_id"] = str(agent_run.id)
             self._db.commit()
 
-            raw_emails: list[dict[str, Any]] = self._raw_emails or []
+            if self._raw_emails:
+                raw_emails = self._raw_emails
+            elif self._gmail is not None:
+                raw_emails = await self._gmail.fetch_unread_emails(limit=limit)
+            else:
+                raw_emails = []
             summary["fetched"] = len(raw_emails)
 
             self._audit(
@@ -124,10 +130,27 @@ class EmailOrchestrator:
 
             for raw_email in raw_emails:
                 gmail_message_id = raw_email.get("gmail_message_id", "")
-                email_id = uuid.uuid4()
+                email_id = uuid.uuid4()  # fallback if save fails before flush
 
                 try:
+                    if gmail_message_id and self._email_exists(gmail_message_id, user_id):
+                        summary["skipped_duplicate"] += 1
+                        self._audit(
+                            user_id=user_id,
+                            email_id=None,
+                            agent_name=_AGENT_ORCHESTRATOR,
+                            action="skip_duplicate",
+                            status="skipped",
+                            details={"gmail_message_id": gmail_message_id},
+                        )
+                        self._db.commit()
+                        continue
+
                     raw_email = self._privacy.mask_email_dict(raw_email)
+                    email_record = self._save_email(user_id, raw_email)
+                    self._db.flush()
+                    email_id = email_record.id
+
                     classification_output, classify_ms = await self._classify_email(raw_email)
                     llm_calls_count += 1
                     llm_total_time_ms += classify_ms or 0
@@ -206,6 +229,8 @@ class EmailOrchestrator:
                             details={"category": classification_output.category.value},
                         )
 
+                    email_record.is_processed = True
+                    email_record.processed_at = datetime.now(timezone.utc)
                     self._db.commit()
                     summary["processed"] += 1
 
@@ -469,6 +494,38 @@ class EmailOrchestrator:
         self._user_id = bootstrap.id
         logger.warning("Created bootstrap user %s for orchestrator processing.", bootstrap.email)
         return bootstrap.id
+
+    def _email_exists(self, gmail_message_id: str, user_id: uuid.UUID) -> bool:
+        return self._db.scalar(
+            select(Email)
+            .where(Email.gmail_message_id == gmail_message_id, Email.user_id == user_id)
+            .limit(1)
+        ) is not None
+
+    def _save_email(self, user_id: uuid.UUID, raw_email: dict[str, Any]) -> Email:
+        received_at: datetime | None = None
+        raw_date = raw_email.get("date")
+        if raw_date:
+            try:
+                received_at = datetime.fromisoformat(str(raw_date))
+            except (ValueError, TypeError):
+                pass
+
+        email = Email(
+            user_id=user_id,
+            gmail_message_id=raw_email.get("gmail_message_id", ""),
+            thread_id=raw_email.get("thread_id"),
+            sender=raw_email.get("sender"),
+            recipient=raw_email.get("recipient"),
+            subject=raw_email.get("subject"),
+            body=raw_email.get("body") or raw_email.get("snippet"),
+            body_html=raw_email.get("body_html"),
+            received_at=received_at,
+            is_processed=False,
+            labels=raw_email.get("labels"),
+        )
+        self._db.add(email)
+        return email
 
     async def _classify_email(
         self,
