@@ -14,7 +14,7 @@ from crewai import Agent, Crew, Process, Task
 from crewai.llms.base_llm import BaseLLM
 from pydantic import ValidationError
 
-from backend.schemas.agent_schemas import SchedulingOutput
+from backend.schemas.agent_schemas import SchedulingActionSchema, SchedulingOutput
 from backend.services.agents.gemini_crew_llm import build_crew_llm
 from backend.services.llm_service import GeminiService, LLMServiceError
 
@@ -45,6 +45,12 @@ Sender: manager@company.vn
 Expected JSON:
 {
   "is_meeting_request": true,
+  "action": {
+    "action_type": "CREATE",
+    "start_time": "2026-05-29T14:00:00+07:00",
+    "end_time":   "2026-05-29T15:00:00+07:00",
+    "attendees":  ["manager@company.vn"]
+  },
   "start_datetime": "2026-05-29T14:00:00+07:00",
   "end_datetime":   "2026-05-29T15:00:00+07:00",
   "event_summary":  "Họp dự án Q3 — phòng họp B",
@@ -58,6 +64,12 @@ Sender: lead@startup.io
 Expected JSON:
 {
   "is_meeting_request": true,
+  "action": {
+    "action_type": "CREATE",
+    "start_time": "2026-06-01T10:00:00+07:00",
+    "end_time":   "2026-06-01T10:30:00+07:00",
+    "attendees":  ["lead@startup.io"]
+  },
   "start_datetime": "2026-06-01T10:00:00+07:00",
   "end_datetime":   "2026-06-01T10:30:00+07:00",
   "event_summary":  "Team sync — sprint alignment",
@@ -71,6 +83,7 @@ Sender: news@newsletter.com
 Expected JSON:
 {
   "is_meeting_request": false,
+  "action": null,
   "start_datetime": null,
   "end_datetime":   null,
   "event_summary":  null,
@@ -84,6 +97,7 @@ Sender: client@corp.com
 Expected JSON:
 {
   "is_meeting_request": true,
+  "action": null,
   "start_datetime": null,
   "end_datetime":   null,
   "event_summary":  "Họp trao đổi kế hoạch dự án",
@@ -97,6 +111,12 @@ Sender: scrum@team.dev
 Expected JSON:
 {
   "is_meeting_request": true,
+  "action": {
+    "action_type": "CREATE",
+    "start_time": "2026-05-29T15:30:00+07:00",
+    "end_time":   "2026-05-29T16:15:00+07:00",
+    "attendees":  ["scrum@team.dev"]
+  },
   "start_datetime": "2026-05-29T15:30:00+07:00",
   "end_datetime":   "2026-05-29T16:15:00+07:00",
   "event_summary":  "Sprint review — chiều thứ Sáu",
@@ -126,6 +146,15 @@ RULES:
 6. suggested_reply must mirror the language of the original email (Vietnamese → Vietnamese,
    English → English). Include the placeholder {{meet_link}} for the Google Meet URL.
 7. event_summary must be a concise title for Google Calendar (max 80 characters).
+8. When is_meeting_request is True and a concrete time is known, populate "action" with:
+   - "action_type": "CREATE" by default; use "UPDATE" only if the email explicitly
+     asks to reschedule or modify an existing calendar event.
+   - "start_time" / "end_time": ISO 8601 strings with +07:00 offset (same values as
+     start_datetime / end_datetime). Timezone assumption: Asia/Ho_Chi_Minh.
+   - "attendees": always include the sender's email address; add any other addresses
+     explicitly mentioned in the email body.
+9. When is_meeting_request is True but no concrete time is provided, set "action" to null.
+10. When is_meeting_request is False, set "action" to null.
 
 {few_shot}
 
@@ -135,6 +164,28 @@ From: {sender}
 Subject: {email_subject}
 Body:
 {email_body}
+""".strip()
+
+_ALTERNATIVES_PROMPT_TEMPLATE = """\
+Current time (Asia/Ho_Chi_Minh): {current_time}
+
+The requested meeting slot {busy_start} – {busy_end} is already occupied by an existing calendar event.
+
+Email subject: {email_subject}
+Email body:
+{email_body}
+
+Suggest exactly 3 alternative meeting times that:
+- Fall within the next 5 business days (Mon–Fri, 08:00–18:00 Vietnam time)
+- Do not conflict with the busy slot above
+- Match the original meeting duration (default 60 min if unspecified)
+
+Respond with a JSON array only — no prose, no markdown fences:
+[
+  {{"start": "YYYY-MM-DDTHH:MM:SS+07:00", "end": "YYYY-MM-DDTHH:MM:SS+07:00"}},
+  {{"start": "YYYY-MM-DDTHH:MM:SS+07:00", "end": "YYYY-MM-DDTHH:MM:SS+07:00"}},
+  {{"start": "YYYY-MM-DDTHH:MM:SS+07:00", "end": "YYYY-MM-DDTHH:MM:SS+07:00"}}
+]
 """.strip()
 
 
@@ -193,9 +244,10 @@ class EmailSchedulingAgent:
         self._task = Task(
             description=_SCHEDULING_TASK_TEMPLATE,
             expected_output=(
-                "A single JSON object with keys: is_meeting_request, start_datetime, "
-                "end_datetime, event_summary, suggested_reply. "
-                "No markdown fences or extra text."
+                "A single JSON object with keys: is_meeting_request, action, "
+                "start_datetime, end_datetime, event_summary, suggested_reply. "
+                "action is a nested object {action_type, start_time, end_time, attendees} "
+                "or null. No markdown fences or extra text."
             ),
             agent=self._agent,
             output_pydantic=SchedulingOutput,
@@ -238,6 +290,44 @@ class EmailSchedulingAgent:
                 "CrewAI scheduling extraction failed, using GeminiService fallback: %s", exc
             )
             return await self._extract_with_gemini(email_subject, email_body, sender, now)
+
+    async def suggest_alternatives(
+        self,
+        email_subject: str,
+        email_body: str,
+        busy_start: datetime,
+        busy_end: datetime,
+    ) -> list[dict[str, str]]:
+        """
+        Return up to 3 alternative meeting slots after a scheduling conflict.
+
+        Args:
+            email_subject: Original email subject for context.
+            email_body:    Original email body for context.
+            busy_start:    Start of the conflicting time slot.
+            busy_end:      End of the conflicting time slot.
+
+        Returns:
+            List of dicts with "start" and "end" ISO 8601 strings (up to 3 items).
+            Returns an empty list if the model cannot produce valid alternatives.
+        """
+        prompt = _ALTERNATIVES_PROMPT_TEMPLATE.format(
+            current_time=_current_time_vn(),
+            busy_start=busy_start.isoformat(),
+            busy_end=busy_end.isoformat(),
+            email_subject=email_subject,
+            email_body=email_body,
+        )
+        try:
+            raw = await self._gemini_service.generate_text(prompt, temperature=0.4)
+            slots = json.loads(self._extract_json_array(raw))
+            return [
+                s for s in slots[:3]
+                if isinstance(s, dict) and "start" in s and "end" in s
+            ]
+        except Exception as exc:
+            logger.warning("suggest_alternatives failed: %s", exc)
+            return []
 
     # ── Internal: CrewAI path ─────────────────────────────────────────────
 
@@ -300,7 +390,7 @@ class EmailSchedulingAgent:
         """
         Apply rule-based corrections that the model might miss:
         - Fill end_datetime when start_datetime is set but end is missing.
-        - Ensure timezone suffix is present on datetime fields.
+        - Derive action from string datetime fields when the LLM omitted it.
         """
         if not output.is_meeting_request:
             return output
@@ -316,6 +406,22 @@ class EmailSchedulingAgent:
                 )
             except (ValueError, OverflowError) as exc:
                 logger.warning("Could not compute default end_datetime: %s", exc)
+
+        if output.action is None and output.start_datetime and output.end_datetime:
+            try:
+                output = output.model_copy(
+                    update={
+                        "action": SchedulingActionSchema(
+                            action_type="CREATE",
+                            start_time=datetime.fromisoformat(output.start_datetime),
+                            end_time=datetime.fromisoformat(output.end_datetime),
+                            attendees=[],
+                        )
+                    }
+                )
+                logger.debug("Post-processed: derived action from string datetime fields.")
+            except (ValueError, ValidationError) as exc:
+                logger.warning("Could not derive SchedulingActionSchema from string fields: %s", exc)
 
         return output
 
@@ -346,6 +452,19 @@ class EmailSchedulingAgent:
             raise SchedulingParseError(
                 f"Unable to parse CrewAI scheduling output: {exc}"
             ) from exc
+
+    @staticmethod
+    def _extract_json_array(raw_text: str) -> str:
+        """Extract the first JSON array from a raw model output string."""
+        text = raw_text.strip()
+        fence_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+        if fence_match:
+            return fence_match.group(1)
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("No JSON array found in model output.")
+        return text[start : end + 1]
 
     @staticmethod
     def _extract_json_object(raw_text: str) -> dict[str, Any]:

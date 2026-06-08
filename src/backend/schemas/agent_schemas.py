@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -173,6 +173,36 @@ class EmailAnalysisOutput(BaseModel):
         return bullets
 
 
+class SchedulingActionSchema(BaseModel):
+    """Structured calendar action extracted from a meeting request."""
+
+    action_type: Literal["CREATE", "UPDATE"] = Field(
+        ...,
+        description=(
+            "CREATE for a new calendar event; UPDATE when the email explicitly "
+            "asks to reschedule or modify an existing event."
+        ),
+    )
+    start_time: datetime = Field(
+        ...,
+        description=(
+            "Meeting start time. Assumed timezone: Asia/Ho_Chi_Minh (+07:00) "
+            "when not specified in the source text."
+        ),
+    )
+    end_time: datetime = Field(
+        ...,
+        description="Meeting end time. Defaults to start_time + 1 hour when not specified.",
+    )
+    attendees: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Email addresses of all meeting attendees. Always include the sender's "
+            "email address. Add any other addresses explicitly mentioned in the email."
+        ),
+    )
+
+
 class SchedulingOutput(BaseModel):
     """
     Structured output produced by the Scheduling Agent.
@@ -181,6 +211,8 @@ class SchedulingOutput(BaseModel):
     fields are ``None`` and no Calendar event should be created.
     When ``True``, all three fields are required non-empty strings in
     ISO 8601 format with explicit ``+07:00`` timezone offset.
+    ``action`` carries the same times as typed ``datetime`` objects and is
+    populated whenever a concrete meeting time is extracted.
     """
 
     model_config = {"strict": True}
@@ -203,6 +235,13 @@ class SchedulingOutput(BaseModel):
             "the email does not specify a duration. Required when is_meeting_request is True."
         ),
     )
+    action: SchedulingActionSchema | None = Field(
+        default=None,
+        description=(
+            "Typed calendar action with parsed datetime fields. Populated when "
+            "is_meeting_request is True and a concrete meeting time was extracted."
+        ),
+    )
     event_summary: str | None = Field(
         default=None,
         description=(
@@ -218,6 +257,14 @@ class SchedulingOutput(BaseModel):
             "Empty string when is_meeting_request is False."
         ),
     )
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def coerce_action(cls, v: Any) -> SchedulingActionSchema | None:
+        """Allow dict → SchedulingActionSchema coercion under strict mode."""
+        if isinstance(v, dict):
+            return SchedulingActionSchema.model_validate(v)
+        return v
 
     @model_validator(mode="after")
     def validate_meeting_fields(self) -> "SchedulingOutput":
