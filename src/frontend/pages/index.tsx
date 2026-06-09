@@ -1,7 +1,9 @@
 import Head from "next/head";
 import Link from "next/link";
-import { useRef, type ReactNode, type CSSProperties } from "react";
+import { useRef, useState, useEffect, type ReactNode, type CSSProperties } from "react";
 import { motion, useInView } from "motion/react";
+import api from "@/lib/axios";
+import type { UserProfile } from "@/lib/types";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type MockEmail = {
@@ -13,7 +15,7 @@ type MockEmail = {
   avatarBg: string;
 };
 
-// ── Dashboard visual mockup ───────────────────────────────────────────────────
+// ── Dashboard visual mockup data ──────────────────────────────────────────────
 const MOCK_EMAILS: MockEmail[] = [
   {
     sender: "Sarah Chen",
@@ -49,17 +51,17 @@ const MOCK_EMAILS: MockEmail[] = [
   },
 ];
 
+// ── Dashboard Mockup ──────────────────────────────────────────────────────────
 function DashboardMockup() {
   return (
     <div className="relative select-none">
       {/* Ambient glow */}
       <div
         aria-hidden
-        className="absolute -inset-8 rounded-[3rem]"
+        className="absolute -inset-8 rounded-[3rem] pointer-events-none"
         style={{
           background:
             "radial-gradient(ellipse 70% 60% at 55% 50%, rgba(99,102,241,0.18) 0%, transparent 70%)",
-          pointerEvents: "none",
         }}
       />
 
@@ -81,7 +83,6 @@ function DashboardMockup() {
           <span className="w-3 h-3 rounded-full" style={{ background: "#ff5f57" }} />
           <span className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
           <span className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-
           <div className="ml-auto flex items-center gap-1.5">
             <span
               className="w-1.5 h-1.5 rounded-full animate-pulse"
@@ -101,24 +102,14 @@ function DashboardMockup() {
           className="flex items-center gap-2 px-4 py-2.5"
           style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}
         >
-          <svg
-            className="w-3.5 h-3.5 flex-shrink-0"
-            fill="none"
-            stroke="#6366f1"
-            viewBox="0 0 24 24"
-          >
+          <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="#6366f1" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
               strokeWidth={2}
               d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"
             />
-            <polyline
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              points="22,6 12,13 2,6"
-            />
+            <polyline strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} points="22,6 12,13 2,6" />
           </svg>
           <span className="text-xs font-semibold" style={{ color: "#a1a1aa" }}>
             Inbox Pipeline
@@ -145,19 +136,14 @@ function DashboardMockup() {
               >
                 {email.sender[0]}
               </div>
-
               <div className="flex-1 min-w-0">
-                <p
-                  className="text-xs font-medium truncate"
-                  style={{ color: "#d4d4d8" }}
-                >
+                <p className="text-xs font-medium truncate" style={{ color: "#d4d4d8" }}>
                   {email.sender}
                 </p>
                 <p className="text-xs truncate" style={{ color: "#52525b" }}>
                   {email.subject}
                 </p>
               </div>
-
               <span
                 className="text-xs font-semibold px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0"
                 style={{ background: email.tagBg, color: email.tagColor }}
@@ -232,12 +218,7 @@ function DashboardMockup() {
           boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
         }}
       >
-        <svg
-          className="w-3.5 h-3.5 flex-shrink-0"
-          fill="none"
-          stroke="#818cf8"
-          viewBox="0 0 24 24"
-        >
+        <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="#818cf8" viewBox="0 0 24 24">
           <path
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -253,6 +234,125 @@ function DashboardMockup() {
   );
 }
 
+// ── Navbar ────────────────────────────────────────────────────────────────────
+function Navbar() {
+  const [user, setUser] = useState<UserProfile | null>(null);
+
+  useEffect(() => {
+    api.get<UserProfile>("/auth/me")
+      .then((res) => setUser(res.data))
+      .catch(() => setUser(null));
+  }, []);
+
+  const initials = user
+    ? (user.display_name ?? user.email)
+        .split(" ")
+        .map((n) => n[0])
+        .slice(0, 2)
+        .join("")
+        .toUpperCase()
+    : "";
+
+  return (
+    <header
+      className="sticky top-0 z-50"
+      style={{
+        background: "rgba(255,255,255,0.88)",
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
+        borderBottom: "1px solid rgba(0,0,0,0.06)",
+      }}
+    >
+      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+
+        {/* Logo */}
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <div
+            className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+            style={{ background: "#6366f1" }}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="white" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2.2}
+                d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"
+              />
+              <polyline strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} points="22,6 12,13 2,6" />
+            </svg>
+          </div>
+          <span className="font-semibold text-zinc-900 tracking-tight" style={{ fontSize: "0.9375rem" }}>
+            Email Orchestrator
+          </span>
+        </div>
+
+        {/* Nav links */}
+        <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-500">
+          <a href="#features" className="hover:text-zinc-900 transition-colors duration-150">
+            Features
+          </a>
+          <a href="#how-it-works" className="hover:text-zinc-900 transition-colors duration-150">
+            How it works
+          </a>
+          <a href="#pricing" className="hover:text-zinc-900 transition-colors duration-150">
+            Pricing
+          </a>
+        </nav>
+
+        {/* Auth state */}
+        {user ? (
+          <Link href="/dashboard" className="flex items-center gap-2.5 group">
+            <div
+              className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0 ring-2 ring-transparent group-hover:ring-indigo-200 transition-all"
+              style={{ background: "#6366f1" }}
+            >
+              {initials}
+            </div>
+            <span
+              className="hidden sm:block text-sm font-medium text-zinc-700 group-hover:text-zinc-900 transition-colors max-w-[140px] truncate"
+            >
+              {user.display_name ?? user.email}
+            </span>
+          </Link>
+        ) : (
+          <Link href="/login" className="btn-primary" style={{ fontSize: "0.8125rem", padding: "0.375rem 1rem" }}>
+            Sign in
+          </Link>
+        )}
+
+      </div>
+    </header>
+  );
+}
+
+// ── Reveal helper ─────────────────────────────────────────────────────────────
+function Reveal({
+  children,
+  delay = 0,
+  className,
+  style,
+}: {
+  children: ReactNode;
+  delay?: number;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  const ref = useRef(null);
+  const inView = useInView(ref, { once: true, margin: "-6% 0px" });
+  return (
+    <motion.div
+      ref={ref}
+      className={className}
+      style={style}
+      initial={{ opacity: 0, y: 24 }}
+      animate={inView ? { opacity: 1, y: 0 } : {}}
+      transition={{ duration: 0.55, delay, ease: [0.22, 1, 0.36, 1] }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
 // ── Hero Section ──────────────────────────────────────────────────────────────
 function HeroSection() {
   return (
@@ -262,15 +362,14 @@ function HeroSection() {
         aria-hidden
         className="pointer-events-none absolute -top-32 -left-32 w-[700px] h-[700px] rounded-full"
         style={{
-          background:
-            "radial-gradient(circle, rgba(99,102,241,0.07) 0%, transparent 65%)",
+          background: "radial-gradient(circle, rgba(99,102,241,0.07) 0%, transparent 65%)",
         }}
       />
 
       <div className="max-w-7xl mx-auto px-6 lg:px-12">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_480px] gap-12 lg:gap-20 items-center">
 
-          {/* ── Left: Typography ── */}
+          {/* Left: Typography */}
           <div>
             <h1
               className="font-bold tracking-tight text-zinc-900 leading-[1.07]"
@@ -303,23 +402,13 @@ function HeroSection() {
                 style={{ padding: "0.625rem 1.375rem", fontSize: "0.9375rem" }}
               >
                 View Dashboard
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 12h14M12 5l7 7-7 7"
-                  />
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
                 </svg>
               </Link>
             </div>
 
-            {/* Social proof row */}
+            {/* Social proof */}
             <div className="mt-12 flex items-center gap-5">
               <div className="flex -space-x-2.5">
                 {["#6366f1", "#8b5cf6", "#06b6d4", "#f59e0b"].map((bg, i) => (
@@ -339,7 +428,7 @@ function HeroSection() {
             </div>
           </div>
 
-          {/* ── Right: Visual placeholder ── */}
+          {/* Right: Dashboard mockup */}
           <div
             className="hidden lg:block"
             style={{ transform: "perspective(900px) rotateY(-6deg) rotateX(2deg)" }}
@@ -353,109 +442,6 @@ function HeroSection() {
   );
 }
 
-// ── Navbar ────────────────────────────────────────────────────────────────────
-function Navbar() {
-  return (
-    <header
-      className="sticky top-0 z-50"
-      style={{
-        background: "rgba(255,255,255,0.88)",
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-        borderBottom: "1px solid rgba(0,0,0,0.06)",
-      }}
-    >
-      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-
-        {/* Logo */}
-        <div className="flex items-center gap-2.5 flex-shrink-0">
-          <div
-            className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-            style={{ background: "#6366f1" }}
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="white"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2.2}
-                d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"
-              />
-              <polyline
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2.2}
-                points="22,6 12,13 2,6"
-              />
-            </svg>
-          </div>
-          <span
-            className="font-semibold text-zinc-900 tracking-tight"
-            style={{ fontSize: "0.9375rem" }}
-          >
-            Email Orchestrator
-          </span>
-        </div>
-
-        {/* Nav links */}
-        <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-500">
-          <a href="#features" className="hover:text-zinc-900 transition-colors duration-150">
-            Features
-          </a>
-          <a href="#how-it-works" className="hover:text-zinc-900 transition-colors duration-150">
-            How it works
-          </a>
-          <a href="#pricing" className="hover:text-zinc-900 transition-colors duration-150">
-            Pricing
-          </a>
-        </nav>
-
-        {/* CTA */}
-        <Link
-          href="/login"
-          className="btn-primary"
-          style={{ fontSize: "0.8125rem", padding: "0.375rem 1rem" }}
-        >
-          Sign in
-        </Link>
-
-      </div>
-    </header>
-  );
-}
-
-// ── Reveal helper ────────────────────────────────────────────────────────────
-function Reveal({
-  children,
-  delay = 0,
-  className,
-  style,
-}: {
-  children: ReactNode;
-  delay?: number;
-  className?: string;
-  style?: CSSProperties;
-}) {
-  const ref = useRef(null);
-  const inView = useInView(ref, { once: true, margin: "-6% 0px" });
-  return (
-    <motion.div
-      ref={ref}
-      className={className}
-      style={style}
-      initial={{ opacity: 0, y: 24 }}
-      animate={inView ? { opacity: 1, y: 0 } : {}}
-      transition={{ duration: 0.55, delay, ease: [0.22, 1, 0.36, 1] }}
-    >
-      {children}
-    </motion.div>
-  );
-}
-
 // ── Workflow Section ──────────────────────────────────────────────────────────
 function WorkFlowSection() {
   return (
@@ -463,10 +449,7 @@ function WorkFlowSection() {
       <div className="max-w-7xl mx-auto px-6 lg:px-12">
 
         <Reveal>
-          <p
-            className="text-xs font-semibold tracking-widest uppercase mb-4"
-            style={{ color: "#52525b" }}
-          >
+          <p className="text-xs font-semibold tracking-widest uppercase mb-4" style={{ color: "#52525b" }}>
             How it works
           </p>
           <h2
@@ -492,7 +475,7 @@ function WorkFlowSection() {
 
         <div className="mt-16 lg:mt-20 space-y-5">
 
-          {/* Step 01 — Reading */}
+          {/* Step 01: Reading */}
           <Reveal delay={0.08}>
             <div
               className="rounded-2xl p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-8 items-center"
@@ -566,7 +549,7 @@ function WorkFlowSection() {
             </div>
           </Reveal>
 
-          {/* Step 02 — Classifying */}
+          {/* Step 02: Classifying */}
           <Reveal delay={0.16}>
             <div
               className="rounded-2xl p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-8 items-center"
@@ -637,7 +620,7 @@ function WorkFlowSection() {
             </div>
           </Reveal>
 
-          {/* Step 03 — Drafting */}
+          {/* Step 03: Drafting */}
           <Reveal delay={0.24}>
             <div
               className="rounded-2xl p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-[1fr_260px] gap-8 items-center"
@@ -708,12 +691,7 @@ function WorkFlowSection() {
                   }}
                 >
                   <svg className="w-3 h-3" fill="none" stroke="#34d399" viewBox="0 0 24 24">
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M5 13l4 4L19 7"
-                    />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                   <span className="text-[10px] font-semibold" style={{ color: "#34d399" }}>
                     Approve draft
@@ -768,7 +746,7 @@ function RoiMetricsSection() {
           </h2>
         </Reveal>
 
-        {/* Stats — editorial asymmetric grid */}
+        {/* Stats: editorial asymmetric grid */}
         <div className="mt-16 lg:mt-20 grid grid-cols-1 lg:grid-cols-[1.6fr_1fr_1fr] divide-y lg:divide-y-0 lg:divide-x divide-zinc-100">
 
           <Reveal delay={0.06} className="lg:pr-16 pb-12 lg:pb-0">
@@ -859,12 +837,332 @@ function RoiMetricsSection() {
   );
 }
 
+// ── Feature Bento Grid ────────────────────────────────────────────────────────
+function FeatureBentoGrid() {
+  return (
+    <section id="features" className="py-24 lg:py-32" style={{ background: "#f4f4f5" }}>
+      <div className="max-w-7xl mx-auto px-6 lg:px-12">
+
+        <Reveal>
+          <p className="text-xs font-semibold tracking-widest uppercase mb-4 text-zinc-400">
+            Features
+          </p>
+          <h2
+            className="font-bold tracking-tight text-zinc-900 leading-[1.08]"
+            style={{ fontSize: "clamp(2rem, 4vw, 3rem)", maxWidth: "22ch" }}
+          >
+            From noise to signal,
+            <br />
+            on autopilot.
+          </h2>
+        </Reveal>
+
+        {/* Asymmetric bento: left cell spans 2 rows, right has 2 stacked smaller cells */}
+        <div className="mt-14 lg:mt-16 grid grid-cols-1 lg:grid-cols-[1.35fr_1fr] gap-4 lg:gap-5">
+
+          {/* Cell A: Auto Mode (spans full height left column) */}
+          <Reveal delay={0.06} className="lg:row-span-2">
+            <div
+              className="relative rounded-3xl p-8 lg:p-10 flex flex-col h-full overflow-hidden"
+              style={{
+                background: "#0d1117",
+                border: "1px solid rgba(255,255,255,0.06)",
+                minHeight: "420px",
+              }}
+            >
+              {/* Ambient glow */}
+              <div
+                aria-hidden
+                className="absolute inset-0 pointer-events-none"
+                style={{
+                  background:
+                    "radial-gradient(ellipse 55% 45% at 20% 85%, rgba(99,102,241,0.13) 0%, transparent 70%)",
+                }}
+              />
+
+              <div className="relative z-10 flex flex-col h-full">
+                {/* Header copy */}
+                <div className="mb-auto pb-8">
+                  <h3
+                    className="font-semibold leading-snug"
+                    style={{ color: "#f4f4f5", fontSize: "clamp(1.125rem, 2vw, 1.375rem)" }}
+                  >
+                    Let the pipeline run itself
+                  </h3>
+                  <p
+                    className="mt-2 text-sm leading-relaxed"
+                    style={{ color: "#71717a", maxWidth: "38ch" }}
+                  >
+                    Flip Auto Mode on and agents handle reading, classifying, and drafting
+                    without waiting for a manual trigger.
+                  </p>
+                </div>
+
+                {/* Main toggle */}
+                <div
+                  className="flex items-center justify-between px-5 py-4 rounded-2xl mb-2.5"
+                  style={{
+                    background: "rgba(255,255,255,0.05)",
+                    border: "1px solid rgba(255,255,255,0.09)",
+                  }}
+                >
+                  <div>
+                    <p className="text-sm font-semibold" style={{ color: "#f4f4f5" }}>
+                      Auto Mode
+                    </p>
+                    <p className="text-xs mt-0.5" style={{ color: "#52525b" }}>
+                      Process all incoming mail
+                    </p>
+                  </div>
+                  {/* Toggle: ON */}
+                  <div
+                    className="relative w-11 h-6 rounded-full flex-shrink-0"
+                    style={{
+                      background: "#6366f1",
+                      boxShadow: "0 0 14px rgba(99,102,241,0.45)",
+                    }}
+                  >
+                    <div
+                      className="absolute right-1 top-1 w-4 h-4 rounded-full"
+                      style={{ background: "#ffffff" }}
+                    />
+                  </div>
+                </div>
+
+                {/* Sub-toggles */}
+                {[
+                  {
+                    label: "Smart escalation",
+                    sub: "Urgent threads ping Slack",
+                    on: true,
+                  },
+                  {
+                    label: "Auto-send confident drafts",
+                    sub: "High-confidence replies only",
+                    on: false,
+                  },
+                ].map((item) => (
+                  <div
+                    key={item.label}
+                    className="flex items-center justify-between px-5 py-3.5 rounded-xl mb-2"
+                    style={{
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px solid rgba(255,255,255,0.04)",
+                    }}
+                  >
+                    <div>
+                      <p
+                        className="text-xs font-medium"
+                        style={{ color: item.on ? "#d4d4d8" : "#52525b" }}
+                      >
+                        {item.label}
+                      </p>
+                      <p className="text-[10px] mt-0.5" style={{ color: "#3f3f46" }}>
+                        {item.sub}
+                      </p>
+                    </div>
+                    <div
+                      className="relative flex-shrink-0 rounded-full"
+                      style={{
+                        width: "34px",
+                        height: "18px",
+                        background: item.on ? "rgba(99,102,241,0.6)" : "rgba(255,255,255,0.08)",
+                      }}
+                    >
+                      <div
+                        className="absolute top-[2px] rounded-full"
+                        style={{
+                          width: "14px",
+                          height: "14px",
+                          background: item.on ? "#c7d2fe" : "#3f3f46",
+                          right: item.on ? "2px" : "auto",
+                          left: item.on ? "auto" : "2px",
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+
+                {/* Live stats strip */}
+                <div
+                  className="mt-4 grid grid-cols-3 rounded-xl overflow-hidden"
+                  style={{ border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  {[
+                    { v: "247", l: "Processed" },
+                    { v: "38", l: "Drafted" },
+                    { v: "Live", l: "Status", green: true },
+                  ].map((s, i) => (
+                    <div
+                      key={s.l}
+                      className="flex flex-col items-center py-3"
+                      style={{
+                        background: "rgba(255,255,255,0.02)",
+                        borderRight: i < 2 ? "1px solid rgba(255,255,255,0.06)" : undefined,
+                      }}
+                    >
+                      <span
+                        className="text-sm font-bold"
+                        style={{ color: s.green ? "#34d399" : "#f4f4f5" }}
+                      >
+                        {s.v}
+                      </span>
+                      <span className="text-[10px] mt-0.5" style={{ color: "#52525b" }}>
+                        {s.l}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </Reveal>
+
+          {/* Cell B: Before - clutter inbox */}
+          <Reveal delay={0.12}>
+            <div
+              className="rounded-3xl p-6 lg:p-7 h-full"
+              style={{ background: "#fafafa", border: "1px solid #ececec" }}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <span
+                  className="text-xs font-semibold px-2.5 py-1 rounded-full"
+                  style={{ background: "#fff1f1", color: "#ef4444" }}
+                >
+                  Before
+                </span>
+                <span className="text-xs font-medium text-zinc-300">247 unread</span>
+              </div>
+
+              <div className="space-y-1.5">
+                {[
+                  ["noreply@mailchimp.com", "Weekly digest is here"],
+                  ["Sarah Chen", "RE: RE: RE: Budget question"],
+                  ["LinkedIn", "12 new notifications"],
+                  ["hr@rippling.io", "FWD: Action Required: Benefits"],
+                  ["alex@vendor.io", "Following up again..."],
+                ].map(([from, sub]) => (
+                  <div
+                    key={sub}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg"
+                    style={{ background: "#f0f0f0" }}
+                  >
+                    <div
+                      className="w-3.5 h-3.5 rounded-full flex-shrink-0"
+                      style={{ background: "#d4d4d8" }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-medium truncate text-zinc-400">{from}</p>
+                      <p className="text-[10px] truncate text-zinc-400">{sub}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <p className="mt-4 text-xs text-zinc-300">
+                No priority. Everything looks the same weight.
+              </p>
+            </div>
+          </Reveal>
+
+          {/* Cell C: After - AI-organized inbox */}
+          <Reveal delay={0.18}>
+            <div
+              className="relative rounded-3xl p-6 lg:p-7 h-full overflow-hidden"
+              style={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.06)" }}
+            >
+              <div
+                aria-hidden
+                className="absolute top-0 right-0 w-44 h-44 pointer-events-none"
+                style={{
+                  background:
+                    "radial-gradient(circle at 80% 15%, rgba(52,211,153,0.09) 0%, transparent 70%)",
+                }}
+              />
+              <div className="relative z-10">
+                <div className="flex items-center justify-between mb-4">
+                  <span
+                    className="text-xs font-semibold px-2.5 py-1 rounded-full"
+                    style={{ background: "rgba(52,211,153,0.12)", color: "#34d399" }}
+                  >
+                    After
+                  </span>
+                  <span className="text-xs font-medium" style={{ color: "#52525b" }}>
+                    3 need your attention
+                  </span>
+                </div>
+
+                <div className="space-y-1.5">
+                  {[
+                    {
+                      from: "Sarah Chen",
+                      sub: "Q3 Budget Approval",
+                      tag: "Urgent",
+                      tc: "#fca5a5",
+                      tb: "rgba(239,68,68,0.15)",
+                    },
+                    {
+                      from: "alex@vendorco.io",
+                      sub: "Contract Renewal",
+                      tag: "Reply",
+                      tc: "#93c5fd",
+                      tb: "rgba(59,130,246,0.15)",
+                    },
+                    {
+                      from: "Mike Torres",
+                      sub: "Partnership Inquiry",
+                      tag: "Draft Ready",
+                      tc: "#6ee7b7",
+                      tb: "rgba(16,185,129,0.12)",
+                    },
+                  ].map((row) => (
+                    <div
+                      key={row.sub}
+                      className="flex items-center gap-2.5 px-3 py-2 rounded-lg"
+                      style={{ background: "rgba(255,255,255,0.04)" }}
+                    >
+                      <div
+                        className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold flex-shrink-0"
+                        style={{ background: row.tb, color: row.tc }}
+                      >
+                        {row.from[0]}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] font-medium truncate" style={{ color: "#d4d4d8" }}>
+                          {row.from}
+                        </p>
+                        <p className="text-[10px] truncate" style={{ color: "#52525b" }}>
+                          {row.sub}
+                        </p>
+                      </div>
+                      <span
+                        className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full whitespace-nowrap flex-shrink-0"
+                        style={{ background: row.tb, color: row.tc }}
+                      >
+                        {row.tag}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <p className="mt-4 text-xs" style={{ color: "#3f3f46" }}>
+                  Rest archived or handled automatically.
+                </p>
+              </div>
+            </div>
+          </Reveal>
+
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 export default function LandingPage() {
   return (
     <>
       <Head>
-        <title>Email Orchestrator — AI-Powered Inbox Automation</title>
+        <title>Email Orchestrator: AI-Powered Inbox Automation</title>
         <meta
           name="description"
           content="Multi-agent AI that classifies, drafts, and routes every email automatically. Built for B2B teams."
@@ -877,6 +1175,7 @@ export default function LandingPage() {
           <HeroSection />
           <WorkFlowSection />
           <RoiMetricsSection />
+          <FeatureBentoGrid />
           {/* Phase 3: Pricing, CTA */}
         </main>
         <footer
