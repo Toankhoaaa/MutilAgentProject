@@ -148,3 +148,14 @@ export interface EmailAnalysisResult {
   created_at: string;
   updated_at: string;
 }
+
+export interface ScheduleEvent {
+  id: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  attendees: string[];
+  status: 'PENDING' | 'CONFIRMED' | 'CONFLICT';
+  emailSnippet: string;
+  alternativeSlots: string[];
+}
