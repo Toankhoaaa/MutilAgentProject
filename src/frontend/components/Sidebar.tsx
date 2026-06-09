@@ -9,53 +9,43 @@ interface NavItem {
 }
 
 const LayoutGridIcon = () => (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+  <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
       d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
   </svg>
 );
 
 const MailIcon = () => (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+  <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
       d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
   </svg>
 );
 
-const CpuIcon = () => (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-      d="M9 3H7a2 2 0 00-2 2v2M9 3h6M9 3v18m6-18h2a2 2 0 012 2v2m0 0V7m0 0h-6m6 0v10m0 0v2a2 2 0 01-2 2h-2m0 0H9m6 0v-6M9 21H7a2 2 0 01-2-2v-2m0 0V15m0-6H5" />
-  </svg>
-);
-
-const ChartIcon = () => (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-      d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-  </svg>
-);
-
 const DatabaseIcon = () => (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+  <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
       d="M4 7c0-1.657 3.582-3 8-3s8 1.343 8 3M4 7v5c0 1.657 3.582 3 8 3s8-1.343 8-3V7M4 12v5c0 1.657 3.582 3 8 3s8-1.343 8-3v-5" />
   </svg>
 );
 
 const CalendarIcon = () => (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+  <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
       d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+  </svg>
+);
+
+const StarIcon = () => (
+  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
   </svg>
 );
 
 const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: <LayoutGridIcon /> },
-  { href: "/dashboard#emails", label: "Emails", icon: <MailIcon /> },
-  { href: "/dashboard#agents", label: "Agent Status", icon: <CpuIcon /> },
-  { href: "/dashboard#analytics", label: "Analytics", icon: <ChartIcon /> },
-  { href: "/schedules", label: "Lịch hẹn", icon: <CalendarIcon /> },
+  { href: "/emails", label: "Emails", icon: <MailIcon /> },
+  { href: "/schedules", label: "Schedules", icon: <CalendarIcon /> },
 ];
 
 const adminNavItems: NavItem[] = [
@@ -71,25 +61,28 @@ export default function Sidebar({ user }: SidebarProps) {
 
   return (
     <aside className="sidebar">
+      {/* Logo */}
       <div className="sidebar-logo">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 rounded-lg bg-blue-500 flex items-center justify-center flex-shrink-0"
+            style={{ background: "linear-gradient(135deg, #3B82F6 0%, #6366F1 100%)" }}>
             <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           </div>
           <div>
-            <p className="text-white font-semibold text-sm leading-tight">Email</p>
-            <p className="text-indigo-300 text-xs leading-tight">Orchestrator</p>
+            <p style={{ color: "#1E293B", fontWeight: 700, fontSize: "0.9rem", lineHeight: 1.2 }}>Email</p>
+            <p style={{ color: "#64748B", fontSize: "0.7rem", lineHeight: 1.2 }}>Orchestrator AI</p>
           </div>
         </div>
       </div>
 
+      {/* Navigation */}
       <nav className="sidebar-nav">
         <p className="sidebar-section-label">Main Menu</p>
         {navItems.map((item) => {
-          const isActive = router.pathname === item.href.split("#")[0];
+          const isActive = router.pathname === item.href;
           return (
             <Link
               key={item.href}
@@ -101,7 +94,8 @@ export default function Sidebar({ user }: SidebarProps) {
             </Link>
           );
         })}
-        <p className="sidebar-section-label mt-4">Admin</p>
+
+        <p className="sidebar-section-label">Admin</p>
         {adminNavItems.map((item) => {
           const isActive = router.pathname === item.href;
           return (
@@ -117,25 +111,39 @@ export default function Sidebar({ user }: SidebarProps) {
         })}
       </nav>
 
+      {/* PRO Upgrade Card */}
+      <div className="sidebar-upgrade-card">
+        <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", marginBottom: "0.375rem" }}>
+          <span style={{ color: "#3B82F6" }}><StarIcon /></span>
+          <h4>Upgrade to PRO</h4>
+        </div>
+        <p>Unlock advanced AI features and unlimited processing</p>
+        <a href="#" className="sidebar-upgrade-btn">Upgrade Account</a>
+      </div>
+
+      {/* User Footer */}
       <div className="sidebar-footer">
         {user ? (
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center flex-shrink-0">
-              <span className="text-white text-[10px] font-bold">
+            <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
+              style={{ background: "linear-gradient(135deg, #3B82F6 0%, #8B5CF6 100%)" }}>
+              <span style={{ color: "white", fontSize: "0.6875rem", fontWeight: 700 }}>
                 {user.display_name
                   ? user.display_name.split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase()
                   : user.email[0].toUpperCase()}
               </span>
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-medium text-slate-300 truncate leading-tight">
+              <p style={{ fontSize: "0.8125rem", fontWeight: 600, color: "#1E293B", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {user.display_name ?? user.email.split("@")[0]}
               </p>
-              <p className="text-[10px] text-slate-500 truncate leading-tight">{user.email}</p>
+              <p style={{ fontSize: "0.6875rem", color: "#94A3B8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {user.email}
+              </p>
             </div>
           </div>
         ) : (
-          <div className="text-[10px] text-slate-600 text-center uppercase tracking-widest">
+          <div style={{ fontSize: "0.6875rem", color: "#94A3B8", textAlign: "center", textTransform: "uppercase", letterSpacing: "0.1em" }}>
             Multi-Agent AI
           </div>
         )}
