@@ -1,16 +1,16 @@
 import "@/styles/globals.css";
 import type { AppProps } from "next/app";
-import { Inter } from "next/font/google";
+import { Geist } from "next/font/google";
 
-const inter = Inter({
+const geist = Geist({
   subsets: ["latin"],
-  variable: "--font-inter",
+  variable: "--font-geist",
   display: "swap",
 });
 
 export default function App({ Component, pageProps }: AppProps) {
   return (
-    <div className={inter.variable}>
+    <div className={geist.variable}>
       <Component {...pageProps} />
     </div>
   );
