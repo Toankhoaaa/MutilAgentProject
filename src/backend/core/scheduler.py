@@ -11,6 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 
 _JOB_ID = "poll_emails"
+_SPAM_CLEANUP_JOB_ID = "daily_spam_cleanup"
 _DEFAULT_INTERVAL_MINUTES = 5
 
 scheduler = AsyncIOScheduler()
@@ -84,10 +85,51 @@ async def _poll_job() -> None:
         db.close()
 
 
+async def _spam_cleanup_job() -> None:
+    """Daily job: move all SPAM folder messages to trash for every active user."""
+    from backend.core.database import SessionLocal
+    from backend.models.user import User
+    from backend.services.gmail_service import GmailService, google_credentials_from_token_json
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        users = db.scalars(select(User).where(User.is_active.is_(True))).all()
+        for user in users:
+            if not user.google_oauth_token:
+                continue
+            try:
+                creds = google_credentials_from_token_json(user.google_oauth_token)
+                gmail_service = GmailService(credentials=creds)
+                result = await gmail_service.cleanup_spam_folder()
+                logger.info(
+                    "Daily spam cleanup for user %s: trashed=%s errors=%s",
+                    user.id,
+                    result["trashed"],
+                    result["errors"],
+                )
+                refreshed = gmail_service.credentials_to_json()
+                if refreshed != user.google_oauth_token:
+                    user.google_oauth_token = refreshed
+                    db.commit()
+            except Exception as exc:
+                logger.error("Spam cleanup failed for user %s: %s", user.id, exc)
+    except Exception as exc:
+        logger.exception("Daily spam cleanup job failed: %s", exc)
+    finally:
+        db.close()
+
+
 def start_scheduler() -> None:
     if scheduler.running:
         return
     scheduler.add_job(_poll_job, _make_trigger(), id=_JOB_ID, replace_existing=True)
+    scheduler.add_job(
+        _spam_cleanup_job,
+        IntervalTrigger(hours=24),
+        id=_SPAM_CLEANUP_JOB_ID,
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info("Email poll scheduler started (interval=%s min).", _interval_minutes)
 

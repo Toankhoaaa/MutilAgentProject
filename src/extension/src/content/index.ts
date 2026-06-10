@@ -1,5 +1,6 @@
 import * as InboxSDK from '@inboxsdk/core';
 import axios from 'axios';
+import { getSnippets, type Snippet } from '../services/storage';
 
 const APP_ID = 'sdk_muiltiAgent_7834f5e8f1';
 const API_BASE = 'http://localhost:8000/api/v1';
@@ -24,6 +25,281 @@ function escapeHtml(text: string): string {
     .replace(/\n/g, '<br>');
 }
 
+// ── Snippet Engine ────────────────────────────────────────────────────────
+
+let snippetCache: Snippet[] | null = null;
+
+// Tracks the last active compose view and cursor position so the popup can insert templates
+interface ComposeViewRef { getBodyElement(): Element | null; }
+let lastComposeView: ComposeViewRef | null = null;
+let lastRange: Range | null = null;
+
+chrome.runtime.onMessage.addListener((msg: { type: string; content: string; language: string }) => {
+  if (msg.type !== 'INSERT_TEMPLATE' || !lastComposeView) return;
+  const body = lastComposeView.getBodyElement();
+  if (!body) return;
+  (body as HTMLElement).focus();
+  const sel = window.getSelection();
+  if (sel && lastRange) {
+    sel.removeAllRanges();
+    sel.addRange(lastRange);
+  }
+  const cmd = msg.language === 'template' ? 'insertHTML' : 'insertText';
+  document.execCommand(cmd, false, msg.content);
+});
+
+function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
+  let timer: ReturnType<typeof setTimeout>;
+  return (...args: T): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+async function warmSnippetCache(): Promise<void> {
+  snippetCache = await getSnippets();
+}
+
+// Invalidate after a quiet period so rapid snippet saves don't thrash storage reads
+const invalidateSnippetCache = debounce(() => {
+  snippetCache = null;
+}, 300);
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && 'snippets' in changes) invalidateSnippetCache();
+});
+
+function attachSnippetEngine(composeView: InboxSDK.ComposeView): void {
+  const body = composeView.getBodyElement();
+  if (!body) return;
+
+  let buffer = '';
+
+  // ── Slash-command dropdown state ────────────────────────────────────────
+  let slashQuery: string | null = null;
+  let selectedIndex = 0;
+  let filteredItems: Snippet[] = [];
+  let dropdown: HTMLDivElement | null = null;
+
+  function positionDropdown(): void {
+    if (!dropdown) return;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    const r = sel.getRangeAt(0).cloneRange();
+    r.collapse(true);
+    const rect = r.getBoundingClientRect();
+    dropdown.style.top = `${rect.bottom + 6}px`;
+    dropdown.style.left = `${Math.max(rect.left, 8)}px`;
+  }
+
+  function renderItems(): void {
+    if (!dropdown) return;
+    const el = dropdown;
+    el.innerHTML = '';
+    if (filteredItems.length === 0) {
+      const msg = document.createElement('div');
+      msg.style.cssText = 'padding:8px 14px;color:#80868b;font-size:12px';
+      msg.textContent = 'No templates found';
+      el.appendChild(msg);
+      return;
+    }
+    filteredItems.forEach((item, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = [
+        'padding:7px 14px',
+        'cursor:pointer',
+        `background:${i === selectedIndex ? '#e8f0fe' : '#fff'}`,
+        i < filteredItems.length - 1 ? 'border-bottom:1px solid #f1f3f4' : '',
+      ].join(';');
+      const trig = document.createElement('div');
+      trig.style.cssText = 'font-weight:600;color:#1a73e8;font-size:12px';
+      trig.textContent = item.trigger;
+      const preview = document.createElement('div');
+      preview.style.cssText = 'color:#5f6368;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px;margin-top:2px';
+      preview.textContent = item.content.length > 60 ? item.content.slice(0, 60) + '…' : item.content;
+      row.appendChild(trig);
+      row.appendChild(preview);
+      row.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        selectedIndex = i;
+        confirmSelection();
+      });
+      el.appendChild(row);
+    });
+  }
+
+  function applyFilter(): void {
+    const cache = snippetCache ?? [];
+    filteredItems = slashQuery
+      ? cache.filter((s) => s.trigger.toLowerCase().includes(slashQuery!.toLowerCase()))
+      : [...cache];
+    selectedIndex = Math.min(selectedIndex, Math.max(filteredItems.length - 1, 0));
+    renderItems();
+    positionDropdown();
+  }
+
+  function showDropdown(): void {
+    if (!dropdown) {
+      dropdown = document.createElement('div');
+      dropdown.style.cssText = [
+        'position:fixed',
+        'z-index:2147483647',
+        'background:#fff',
+        'border:1px solid #dadce0',
+        'border-radius:8px',
+        'box-shadow:0 2px 10px rgba(0,0,0,.2)',
+        'max-height:220px',
+        'overflow-y:auto',
+        'min-width:260px',
+        'font-family:Google Sans,Roboto,sans-serif',
+      ].join(';');
+      document.body.appendChild(dropdown);
+    }
+    applyFilter();
+  }
+
+  function hideDropdown(): void {
+    dropdown?.remove();
+    dropdown = null;
+    slashQuery = null;
+    selectedIndex = 0;
+    filteredItems = [];
+  }
+
+  function confirmSelection(): void {
+    if (filteredItems.length === 0 || slashQuery === null) { hideDropdown(); return; }
+    const snippet = filteredItems[selectedIndex];
+    if (!snippet) { hideDropdown(); return; }
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) {
+      // All chars of "/<query>" are in the DOM (Tab is not a printable insert)
+      for (let i = 0; i < slashQuery.length + 1; i++) {
+        sel.modify('extend', 'backward', 'character');
+      }
+      const cmd = snippet.language === 'template' ? 'insertHTML' : 'insertText';
+      document.execCommand(cmd, false, snippet.content);
+    }
+    buffer = '';
+    hideDropdown();
+  }
+
+  // Close dropdown when clicking outside
+  const onOutsideClick = (e: MouseEvent) => {
+    if (dropdown && !dropdown.contains(e.target as Node)) hideDropdown();
+  };
+  document.addEventListener('mousedown', onOutsideClick);
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────
+  if (!snippetCache) void warmSnippetCache();
+
+  body.addEventListener('blur', () => {
+    lastComposeView = composeView;
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) lastRange = sel.getRangeAt(0).cloneRange();
+  });
+
+  composeView.on('destroy', () => {
+    hideDropdown();
+    document.removeEventListener('mousedown', onOutsideClick);
+  });
+
+  // ── Keydown ──────────────────────────────────────────────────────────────
+  body.addEventListener('keydown', (e: KeyboardEvent) => {
+
+    // ── Dropdown mode ──
+    if (slashQuery !== null && dropdown) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        selectedIndex = Math.min(selectedIndex + 1, filteredItems.length - 1);
+        renderItems();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        selectedIndex = Math.max(selectedIndex - 1, 0);
+        renderItems();
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        confirmSelection();
+        return;
+      }
+      if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+        hideDropdown();
+        buffer = '';
+        return; // don't preventDefault — let the char/newline/space through
+      }
+      if (e.key === 'Backspace') {
+        if (slashQuery.length === 0) {
+          hideDropdown();
+        } else {
+          slashQuery = slashQuery.slice(0, -1);
+          selectedIndex = 0;
+          applyFilter();
+        }
+        buffer = buffer.slice(0, -1);
+        return;
+      }
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        slashQuery += e.key;
+        selectedIndex = 0;
+        applyFilter();
+        buffer = (buffer + e.key).slice(-20);
+        return; // char inserts normally (no preventDefault)
+      }
+      return;
+    }
+
+    // ── Normal mode ──
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Backspace') { buffer = buffer.slice(0, -1); return; }
+    if (e.key === 'Escape' || e.key === 'Enter') { buffer = ''; return; }
+    if (e.key.length !== 1) return;
+
+    // "/" at a word boundary opens the slash-command picker
+    if (e.key === '/' && (buffer === '' || /[\s\n]$/.test(buffer))) {
+      buffer = (buffer + '/').slice(-20);
+      slashQuery = '';
+      selectedIndex = 0;
+      if (!snippetCache) {
+        void warmSnippetCache().then(() => { if (slashQuery !== null) showDropdown(); });
+      } else {
+        showDropdown();
+      }
+      return; // "/" inserts normally (no preventDefault)
+    }
+
+    // Auto-expand trigger detection
+    const tentative = (buffer + e.key).slice(-20);
+    const cache = snippetCache;
+
+    if (cache) {
+      for (const snippet of cache) {
+        if (tentative.endsWith(snippet.trigger)) {
+          e.preventDefault();
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount) {
+            for (let i = 0; i < snippet.trigger.length - 1; i++) {
+              sel.modify('extend', 'backward', 'character');
+            }
+            const cmd = snippet.language === 'template' ? 'insertHTML' : 'insertText';
+            document.execCommand(cmd, false, snippet.content);
+          }
+          buffer = tentative.slice(0, -snippet.trigger.length);
+          return;
+        }
+      }
+    } else {
+      void warmSnippetCache();
+    }
+
+    buffer = tentative;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 InboxSDK.load(2, APP_ID).then((sdk) => {
   // Track open thread views by thread ID so the compose handler can read them
   const threadViews = new Map<string, InboxSDK.ThreadView>();
@@ -35,14 +311,75 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
   });
 
   sdk.Compose.registerComposeViewHandler((composeView) => {
-    let isLoading = false;
+    attachSnippetEngine(composeView);
+    composeView.on('destroy', () => {
+      if (lastComposeView === composeView) { lastComposeView = null; lastRange = null; }
+    });
 
+    let isLoading = false;
+    let replyAbortController: AbortController | null = null;
+    let replyTaskId: string | null = null;
+
+    // ── Stop button ──────────────────────────────────────────────────────────
+    const stopBtn = document.createElement('button');
+    stopBtn.innerHTML = '🛑 Dừng';
+    stopBtn.title = 'Hủy tạo nội dung AI';
+    stopBtn.style.cssText = [
+      'display:none',
+      'position:absolute',
+      'bottom:10px',
+      'right:14px',
+      'z-index:2147483647',
+      'padding:5px 12px',
+      'border:1.5px solid #e53935',
+      'background:#fff',
+      'color:#e53935',
+      'border-radius:4px',
+      'font-size:12px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'cursor:pointer',
+      'box-shadow:0 2px 6px rgba(0,0,0,.15)',
+    ].join(';');
+
+    const composeEl = composeView.getElement() as HTMLElement;
+    composeEl.style.position = 'relative';
+    composeEl.appendChild(stopBtn);
+
+    stopBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      replyAbortController?.abort();
+      const taskId = replyTaskId;
+      if (taskId) {
+        void chrome.storage.local.get('ai_reply_token').then((stored) => {
+          const token = stored['ai_reply_token'] as string | undefined;
+          if (token) {
+            fetch(`${API_BASE}/tasks/${taskId}/cancel`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` },
+            }).catch(() => {});
+          }
+        });
+      }
+    });
+
+    composeView.on('destroy', () => {
+      replyAbortController?.abort();
+      stopBtn.remove();
+    });
+
+    // ── AI Reply button ──────────────────────────────────────────────────────
     composeView.addButton({
       title: 'AI Reply',
       iconUrl: AI_REPLY_ICON,
       onClick: () => {
         if (isLoading) return;
         isLoading = true;
+
+        const taskId = crypto.randomUUID();
+        const controller = new AbortController();
+        replyAbortController = controller;
+        replyTaskId = taskId;
+        stopBtn.style.display = 'block';
 
         composeView.setBodyHTML('<p><em>⏳ Generating AI reply…</em></p>');
 
@@ -69,20 +406,30 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
             }
 
             const { data } = await axios.post<ProcessEmailResult>(
-              `${API_BASE}/emails/process`,
-              { text: threadText || '(no thread body)', subject },
-              { headers: { Authorization: `Bearer ${token}` } },
+              `${API_BASE}/emails/classify`,
+              { subject, text: threadText || '(no thread body)', sender: '', task_id: taskId },
+              {
+                headers: { Authorization: `Bearer ${token}` },
+                signal: controller.signal,
+              },
             );
 
             const reply = data.draft_content ?? data.summary;
             composeView.setBodyHTML(`<p>${escapeHtml(reply)}</p>`);
           } catch (err) {
-            console.error('[AI Reply] API call failed:', err);
-            composeView.setBodyHTML(
-              '<p><em>❌ AI Reply failed — check the console for details.</em></p>',
-            );
+            if (axios.isCancel(err)) {
+              composeView.setBodyHTML('<p><em>🛑 Đã hủy tạo nội dung.</em></p>');
+            } else {
+              console.error('[AI Reply] API call failed:', err);
+              composeView.setBodyHTML(
+                '<p><em>❌ AI Reply failed — check the console for details.</em></p>',
+              );
+            }
           } finally {
             isLoading = false;
+            replyAbortController = null;
+            replyTaskId = null;
+            stopBtn.style.display = 'none';
           }
         })();
       },

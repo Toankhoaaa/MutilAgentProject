@@ -328,6 +328,7 @@ class ProcessEmailRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Email body text.")
     subject: str = Field(default="", description="Email subject line.")
     sender: str = Field(default="", description="Sender email address.")
+    task_id: str | None = Field(default=None, description="Client-generated UUID for cooperative cancellation.")
 
 
 class ProcessEmailResult(BaseModel):

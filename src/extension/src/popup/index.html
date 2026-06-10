@@ -17,9 +17,16 @@
     button { padding: 6px 12px; cursor: pointer; font-size: 13px; }
     #fetch-btn { background: #1a73e8; color: #fff; border: none; border-radius: 4px; }
     #fetch-btn:disabled { opacity: 0.6; cursor: default; }
+    #spam-btn { background: #e65100; color: #fff; border: none; border-radius: 4px; }
+    #spam-btn:disabled { opacity: 0.5; cursor: default; }
+    #ai-cleanup-btn { background: #1e8e3e; color: #fff; border: none; border-radius: 4px; }
+    #ai-cleanup-btn:disabled { opacity: 0.5; cursor: default; }
+    #ai-stop-btn { background: #fff; color: #c62828; border: 1px solid #e57373; border-radius: 4px; display: none; }
+    #ai-stop-btn:hover { background: #fde8e8; }
     #status { margin-top: 8px; font-size: 12px; min-height: 16px; }
     details { margin-top: 10px; font-size: 12px; }
     summary { cursor: pointer; color: #555; }
+    hr { border: none; border-top: 1px solid #e0e0e0; margin: 12px 0; }
   </style>
 </head>
 <body>
@@ -41,7 +48,20 @@
     </div>
   </details>
 
+  <hr>
+  <p style="margin-bottom:6px; font-size:13px;">Dọn dẹp hộp thư:</p>
+  <div class="buttons">
+    <button id="spam-btn" disabled>Dọn dẹp thư mục SPAM</button>
+    <button id="ai-cleanup-btn" disabled>Dọn dẹp hộp thư (AI)</button>
+    <button id="ai-stop-btn">🛑 Dừng</button>
+  </div>
+
   <div id="status"></div>
+
+  <hr>
+  <div id="snippets-root"></div>
+
   <script type="module" src="popup.ts"></script>
+  <script type="module" src="snippets-mount.ts"></script>
 </body>
 </html>

@@ -205,6 +205,39 @@ class GmailService:
 
         return results
 
+    async def fetch_emails(self, query: str = "in:inbox", limit: int = 50) -> list[dict[str, Any]]:
+        """Fetch messages matching a Gmail search query."""
+        service = await self.get_service()
+        try:
+            list_response = await asyncio.to_thread(
+                lambda: service.users()
+                .messages()
+                .list(userId="me", q=query, maxResults=limit)
+                .execute()
+            )
+        except HttpError as exc:
+            raise self._wrap_http_error(exc, "Failed to list Gmail messages.") from exc
+
+        messages = list_response.get("messages", [])
+        results: list[dict[str, Any]] = []
+
+        for message_ref in messages:
+            message_id = message_ref["id"]
+            try:
+                full_message = await asyncio.to_thread(
+                    lambda mid=message_id: service.users()
+                    .messages()
+                    .get(userId="me", id=mid, format="full")
+                    .execute()
+                )
+            except HttpError as exc:
+                logger.error("Failed to fetch Gmail message %s: %s", message_id, exc)
+                continue
+
+            results.append(self._parse_message(full_message))
+
+        return results
+
     async def create_draft(
         self,
         to: str,
@@ -293,6 +326,48 @@ class GmailService:
     async def star_message(self, message_id: str) -> dict[str, Any]:
         """Star a message by adding the ``STARRED`` label."""
         return await self.modify_message_labels(message_id, add_labels=["STARRED"])
+
+    async def cleanup_spam_folder(self) -> dict[str, Any]:
+        """Move all messages in the Gmail SPAM folder to trash.
+
+        Returns a summary dict with ``trashed`` and ``errors`` counts.
+        404 responses are treated as already-deleted (counted as trashed).
+        """
+        service = await self.get_service()
+        try:
+            list_response = await asyncio.to_thread(
+                lambda: service.users()
+                .messages()
+                .list(userId="me", labelIds=["SPAM"], maxResults=500)
+                .execute()
+            )
+        except HttpError as exc:
+            raise self._wrap_http_error(exc, "Failed to list SPAM messages.") from exc
+
+        messages = list_response.get("messages", [])
+        if not messages:
+            return {"trashed": 0, "errors": 0}
+
+        trashed = 0
+        errors = 0
+        for msg in messages:
+            try:
+                await asyncio.to_thread(
+                    lambda mid=msg["id"]: service.users()
+                    .messages()
+                    .trash(userId="me", id=mid)
+                    .execute()
+                )
+                trashed += 1
+            except HttpError as exc:
+                if getattr(exc.resp, "status", None) == 404:
+                    trashed += 1  # already gone
+                else:
+                    logger.error("Failed to trash SPAM message %s: %s", msg["id"], exc)
+                    errors += 1
+
+        logger.info("cleanup_spam_folder: trashed=%d errors=%d", trashed, errors)
+        return {"trashed": trashed, "errors": errors}
 
     def _parse_message(self, message: dict[str, Any]) -> dict[str, Any]:
         """Parse a Gmail API message resource into a normalized dictionary."""

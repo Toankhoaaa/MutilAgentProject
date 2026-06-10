@@ -149,6 +149,27 @@ export interface EmailAnalysisResult {
   updated_at: string;
 }
 
+export interface AdminUser {
+  id: string;
+  email: string;
+  display_name: string | null;
+  is_active: boolean;
+  is_admin: boolean;
+  subscription_tier: string;
+  max_requests: number;
+  request_count: number;
+  status: string;
+  tier_expires_at: string | null;
+  created_at: string;
+}
+
+export interface AdminUserListResponse {
+  items: AdminUser[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
 export interface ScheduleEvent {
   id: string;
   title: string;

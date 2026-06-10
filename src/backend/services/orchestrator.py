@@ -12,14 +12,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.core import task_manager
 from backend.core.websocket_manager import manager
 from backend.models.agent_run import AgentRun
 from backend.models.audit_log import AuditLog
-from backend.models.classification import Classification
 from backend.models.configuration import Configuration
-from backend.models.draft import Draft
-from backend.models.email import Email
-from backend.models.processing_queue import ProcessingQueue
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput
 from backend.services.agents.classifier_agent import EmailClassifierAgent
@@ -43,10 +40,10 @@ _DEFAULT_AGENT_TONE = "professional"
 
 class EmailOrchestrator:
     """
-    Coordinates the end-to-end email ingestion and multi-agent processing pipeline.
+    Coordinates the end-to-end email processing pipeline.
 
-    Flow: Fetch -> Filter/Save -> Classify -> Conditional Draft -> Mark Processed.
-    Each per-email step is audit-logged; failures are isolated per message.
+    Stateless: emails are fetched, classified, and drafted in memory only.
+    AgentRun and AuditLog entries are still persisted for observability.
     """
 
     def __init__(
@@ -61,6 +58,7 @@ class EmailOrchestrator:
         rag_agent: RagAgent | None = None,
         scheduling_agent: EmailSchedulingAgent | None = None,
         calendar_service: GoogleCalendarService | None = None,
+        task_id: str | None = None,
     ) -> None:
         self._db = db
         self._gmail = gmail_service
@@ -72,16 +70,14 @@ class EmailOrchestrator:
         self._rag = rag_agent or RagAgent()
         self._scheduling = scheduling_agent
         self._calendar = calendar_service
+        self._task_id = task_id
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
-        Run the full business workflow for newly fetched unread emails.
+        Fetch unread emails from Gmail, classify them, and create Gmail drafts.
 
-        Args:
-            limit: Maximum number of unread Gmail messages to fetch.
-
-        Returns:
-            Summary dict with counts, ``run_id``, and batch timing metrics.
+        No email content is persisted to the database. Only AgentRun and AuditLog
+        entries are written for observability.
         """
         summary: dict[str, Any] = {
             "fetched": 0,
@@ -120,7 +116,6 @@ class EmailOrchestrator:
 
             self._audit(
                 user_id=user_id,
-                email_id=None,
                 agent_name=_AGENT_ORCHESTRATOR,
                 action="fetch_emails",
                 status="success",
@@ -130,56 +125,41 @@ class EmailOrchestrator:
 
             for raw_email in raw_emails:
                 gmail_message_id = raw_email.get("gmail_message_id", "")
-                email_id = uuid.uuid4()  # fallback if save fails before flush
 
                 try:
-                    if gmail_message_id and self._email_exists(gmail_message_id, user_id):
-                        summary["skipped_duplicate"] += 1
-                        self._audit(
-                            user_id=user_id,
-                            email_id=None,
-                            agent_name=_AGENT_ORCHESTRATOR,
-                            action="skip_duplicate",
-                            status="skipped",
-                            details={"gmail_message_id": gmail_message_id},
-                        )
-                        self._db.commit()
-                        continue
-
+                    self._check_cancelled()
                     raw_email = self._privacy.mask_email_dict(raw_email)
-                    email_record = self._save_email(user_id, raw_email)
-                    self._db.flush()
-                    email_id = email_record.id
 
+                    self._check_cancelled()
                     classification_output, classify_ms = await self._classify_email(raw_email)
                     llm_calls_count += 1
                     llm_total_time_ms += classify_ms or 0
-                    self._save_classification(email_id, classification_output, classify_ms)
 
                     self._audit(
                         user_id=user_id,
-                        email_id=email_id,
                         agent_name=_AGENT_CLASSIFIER,
                         action="classify_email",
                         status="success",
                         details={
+                            "gmail_message_id": gmail_message_id,
                             "category": classification_output.category.value,
                             "priority_score": classification_output.priority_score,
                             "confidence": classification_output.confidence,
                         },
                     )
 
-                    scheduling_result = await self._handle_scheduling(raw_email, email_id, user_id)
+                    self._check_cancelled()
+                    scheduling_result = await self._handle_scheduling(raw_email, user_id)
                     if scheduling_result:
-                        status = scheduling_result["status"]
-                        if status == "scheduled":
+                        result_status = scheduling_result["status"]
+                        if result_status == "scheduled":
                             summary["scheduled_events"].append(
-                                {"email_id": str(email_id), **scheduling_result["payload"]}
+                                {"gmail_message_id": gmail_message_id, **scheduling_result["payload"]}
                             )
-                        elif status == "conflict":
+                        elif result_status == "conflict":
                             summary["scheduling_conflicts"].append(
                                 {
-                                    "email_id": str(email_id),
+                                    "gmail_message_id": gmail_message_id,
                                     "alternatives": scheduling_result.get("alternatives", []),
                                 }
                             )
@@ -194,13 +174,12 @@ class EmailOrchestrator:
                             }
                         )
 
+                    self._check_cancelled()
                     if EmailResponseAgent.is_eligible(classification_output.category):
                         rag_context = self._rag.retrieve(
                             raw_email.get("body") or raw_email.get("snippet") or ""
                         )
-                        draft_gmail_id, draft_ms = await self._draft_and_save(
-                            user_id=user_id,
-                            email_id=email_id,
+                        draft_gmail_id, draft_ms = await self._create_draft(
                             raw_email=raw_email,
                             classification=classification_output,
                             rag_context=rag_context,
@@ -210,11 +189,11 @@ class EmailOrchestrator:
                         summary["drafts_created"] += 1
                         self._audit(
                             user_id=user_id,
-                            email_id=email_id,
                             agent_name=_AGENT_RESPONSE,
                             action="create_draft",
                             status="success",
                             details={
+                                "gmail_message_id": gmail_message_id,
                                 "category": classification_output.category.value,
                                 "draft_gmail_id": draft_gmail_id,
                             },
@@ -222,29 +201,26 @@ class EmailOrchestrator:
                     else:
                         self._audit(
                             user_id=user_id,
-                            email_id=email_id,
                             agent_name=_AGENT_ORCHESTRATOR,
                             action="skip_auto_reply",
                             status="skipped",
-                            details={"category": classification_output.category.value},
+                            details={
+                                "gmail_message_id": gmail_message_id,
+                                "category": classification_output.category.value,
+                            },
                         )
 
-                    email_record.is_processed = True
-                    email_record.processed_at = datetime.now(timezone.utc)
                     self._db.commit()
                     summary["processed"] += 1
 
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
-                    logger.exception(
-                        "Failed to process email %s: %s",
-                        gmail_message_id,
-                        exc,
-                    )
+                    logger.exception("Failed to process email %s: %s", gmail_message_id, exc)
                     self._db.rollback()
 
                     self._audit(
                         user_id=user_id,
-                        email_id=email_id,
                         agent_name=_AGENT_ORCHESTRATOR,
                         action="process_email",
                         status="failed",
@@ -254,11 +230,6 @@ class EmailOrchestrator:
                             "error_type": type(exc).__name__,
                         },
                     )
-                    self._upsert_processing_queue_failure(
-                        user_id=user_id,
-                        gmail_message_id=gmail_message_id,
-                        error=str(exc),
-                    )
                     self._db.commit()
 
                     summary["failed"] += 1
@@ -267,8 +238,6 @@ class EmailOrchestrator:
                     )
 
             final_status = "FAILED" if summary["failed"] > 0 and summary["processed"] == 0 else "COMPLETED"
-            if summary["failed"] > 0 and summary["processed"] > 0:
-                final_status = "COMPLETED"
 
             summary["llm_calls_count"] = llm_calls_count
             summary["llm_total_time_ms"] = llm_total_time_ms
@@ -318,7 +287,9 @@ class EmailOrchestrator:
         self, raw_email: dict[str, Any]
     ) -> dict[str, Any]:
         """Classify a single email and optionally draft a reply with no DB writes."""
+        self._check_cancelled()
         raw_email = self._privacy.mask_email_dict(raw_email)
+        self._check_cancelled()
         classification, _ = await self._classify_email(raw_email)
         result: dict[str, Any] = {
             "category": classification.category.value,
@@ -329,6 +300,7 @@ class EmailOrchestrator:
             "draft_subject": None,
         }
 
+        self._check_cancelled()
         if EmailResponseAgent.is_eligible(classification.category):
             tone, signature = self._load_agent_customization()
             rag_context = self._rag.retrieve(
@@ -350,15 +322,13 @@ class EmailOrchestrator:
     async def _handle_scheduling(
         self,
         raw_email: dict[str, Any],
-        email_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> dict[str, Any] | None:
         """
         Run the scheduling sub-pipeline for one email.
 
         Returns a dict with "status" and either "payload" (free slot) or
-        "alternatives" (conflict), or None when the email is not a meeting
-        request or scheduling integration is not configured.
+        "alternatives" (conflict), or None when not a meeting request.
         """
         if self._scheduling is None or self._calendar is None:
             return None
@@ -366,6 +336,7 @@ class EmailOrchestrator:
         subject = raw_email.get("subject") or ""
         body = raw_email.get("body") or raw_email.get("snippet") or ""
         sender = raw_email.get("sender") or ""
+        gmail_message_id = raw_email.get("gmail_message_id") or ""
 
         try:
             sched_output: SchedulingOutput = await asyncio.wait_for(
@@ -373,10 +344,10 @@ class EmailOrchestrator:
                 timeout=30.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("Scheduling extraction timed out for email %s", email_id)
+            logger.warning("Scheduling extraction timed out for %s", gmail_message_id)
             return None
         except Exception as exc:
-            logger.warning("Scheduling extraction failed for email %s: %s", email_id, exc)
+            logger.warning("Scheduling extraction failed for %s: %s", gmail_message_id, exc)
             return None
 
         if not sched_output.is_meeting_request or sched_output.action is None:
@@ -385,11 +356,11 @@ class EmailOrchestrator:
         action = sched_output.action
         self._audit(
             user_id=user_id,
-            email_id=email_id,
             agent_name=_AGENT_SCHEDULING,
             action="extract_schedule",
             status="success",
             details={
+                "gmail_message_id": gmail_message_id,
                 "start_datetime": sched_output.start_datetime,
                 "end_datetime": sched_output.end_datetime,
                 "event_summary": sched_output.event_summary,
@@ -402,10 +373,9 @@ class EmailOrchestrator:
                 timeout=10.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("Calendar free/busy check timed out for email %s", email_id)
+            logger.warning("Calendar free/busy check timed out for %s", gmail_message_id)
             self._audit(
                 user_id=user_id,
-                email_id=email_id,
                 agent_name=_AGENT_SCHEDULING,
                 action="check_free_busy",
                 status="timeout",
@@ -413,10 +383,9 @@ class EmailOrchestrator:
             )
             return {"status": "timeout"}
         except CalendarAPIError as exc:
-            logger.warning("Calendar API error for email %s: %s", email_id, exc)
+            logger.warning("Calendar API error for %s: %s", gmail_message_id, exc)
             self._audit(
                 user_id=user_id,
-                email_id=email_id,
                 agent_name=_AGENT_SCHEDULING,
                 action="check_free_busy",
                 status="error",
@@ -434,7 +403,6 @@ class EmailOrchestrator:
             }
             self._audit(
                 user_id=user_id,
-                email_id=email_id,
                 agent_name=_AGENT_SCHEDULING,
                 action="slot_available",
                 status="success",
@@ -442,10 +410,8 @@ class EmailOrchestrator:
             )
             return {"status": "scheduled", "payload": payload}
 
-        # Slot is busy — ask for 3 alternatives.
         self._audit(
             user_id=user_id,
-            email_id=email_id,
             agent_name=_AGENT_SCHEDULING,
             action="slot_conflict",
             status="conflict",
@@ -466,16 +432,16 @@ class EmailOrchestrator:
                 timeout=30.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("Alternative slot suggestion timed out for email %s", email_id)
+            logger.warning("Alternative slot suggestion timed out for %s", gmail_message_id)
             alternatives = []
         except Exception as exc:
-            logger.warning("Alternative slot suggestion failed for email %s: %s", email_id, exc)
+            logger.warning("Alternative slot suggestion failed for %s: %s", gmail_message_id, exc)
             alternatives = []
 
         return {"status": "conflict", "alternatives": alternatives}
 
     def _resolve_user_id(self) -> uuid.UUID:
-        """Return the configured or first active user id for mailbox ownership."""
+        """Return the configured or first active user id."""
         if self._user_id is not None:
             return self._user_id
 
@@ -495,37 +461,10 @@ class EmailOrchestrator:
         logger.warning("Created bootstrap user %s for orchestrator processing.", bootstrap.email)
         return bootstrap.id
 
-    def _email_exists(self, gmail_message_id: str, user_id: uuid.UUID) -> bool:
-        return self._db.scalar(
-            select(Email)
-            .where(Email.gmail_message_id == gmail_message_id, Email.user_id == user_id)
-            .limit(1)
-        ) is not None
-
-    def _save_email(self, user_id: uuid.UUID, raw_email: dict[str, Any]) -> Email:
-        received_at: datetime | None = None
-        raw_date = raw_email.get("date")
-        if raw_date:
-            try:
-                received_at = datetime.fromisoformat(str(raw_date))
-            except (ValueError, TypeError):
-                pass
-
-        email = Email(
-            user_id=user_id,
-            gmail_message_id=raw_email.get("gmail_message_id", ""),
-            thread_id=raw_email.get("thread_id"),
-            sender=raw_email.get("sender"),
-            recipient=raw_email.get("recipient"),
-            subject=raw_email.get("subject"),
-            body=raw_email.get("body") or raw_email.get("snippet"),
-            body_html=raw_email.get("body_html"),
-            received_at=received_at,
-            is_processed=False,
-            labels=raw_email.get("labels"),
-        )
-        self._db.add(email)
-        return email
+    def _check_cancelled(self) -> None:
+        """Raise CancelledError if the caller has signalled task cancellation."""
+        if self._task_id and task_manager.is_cancelled(self._task_id):
+            raise asyncio.CancelledError("Task was aborted by user")
 
     async def _classify_email(
         self,
@@ -540,27 +479,6 @@ class EmailOrchestrator:
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
         return result, elapsed_ms
-
-    def _save_classification(
-        self,
-        email_id: uuid.UUID,
-        output: EmailClassificationOutput,
-        processing_time_ms: int | None,
-    ) -> Classification:
-        """Persist classification results linked to an email."""
-        classification = Classification(
-            email_id=email_id,
-            category=output.category.value,
-            priority_score=output.priority_score,
-            summary=output.summary,
-            deadline=self._parse_deadline(output.deadline),
-            confidence=output.confidence,
-            raw_response=output.model_dump(mode="json"),
-            processing_time_ms=processing_time_ms,
-            fallback_used=False,
-        )
-        self._db.add(classification)
-        return classification
 
     def _start_agent_run(self, triggered_by: str = "SYSTEM") -> AgentRun:
         """Create a RUNNING batch record in ``agent_runs``."""
@@ -593,14 +511,13 @@ class EmailOrchestrator:
         agent_run.error_message = error_message
         agent_run.ended_at = datetime.now(timezone.utc)
 
-    async def _draft_and_save(
+    async def _create_draft(
         self,
-        user_id: uuid.UUID,
-        email_id: uuid.UUID,
         raw_email: dict[str, Any],
         classification: EmailClassificationOutput,
         rag_context: str = "",
     ) -> tuple[str, int]:
+        """Generate a reply via the response agent and create a Gmail draft."""
         started = time.monotonic()
         tone, signature = self._load_agent_customization()
 
@@ -617,6 +534,9 @@ class EmailOrchestrator:
         if not sender:
             raise ValueError("Cannot create draft: original sender address is missing.")
 
+        if self._gmail is None:
+            raise ValueError("Cannot create draft: no Gmail service configured.")
+
         draft_gmail_id = await self._gmail.create_draft(
             to=sender,
             subject=reply.subject,
@@ -625,26 +545,6 @@ class EmailOrchestrator:
         )
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        draft_record = Draft(
-            email_id=email_id,
-            draft_content=reply.body_content,
-            draft_gmail_id=draft_gmail_id,
-            subject=reply.subject,
-            is_modified=False,
-            is_sent=False,
-            processing_time_ms=elapsed_ms,
-        )
-        self._db.add(draft_record)
-
-        self._audit(
-            user_id=user_id,
-            email_id=email_id,
-            agent_name=_AGENT_RESPONSE,
-            action="compose_reply",
-            status="success",
-            details={"subject": reply.subject},
-        )
-
         return draft_gmail_id, elapsed_ms
 
     def _load_agent_customization(self) -> tuple[str, str]:
@@ -659,7 +559,6 @@ class EmailOrchestrator:
     def _audit(
         self,
         user_id: uuid.UUID | None,
-        email_id: uuid.UUID | None,
         agent_name: str,
         action: str,
         status: str,
@@ -668,7 +567,7 @@ class EmailOrchestrator:
         """Insert an audit log entry for observability."""
         log_entry = AuditLog(
             user_id=user_id,
-            email_id=email_id,
+            email_id=None,
             agent_name=agent_name,
             action=action,
             status=status,
@@ -676,40 +575,9 @@ class EmailOrchestrator:
         )
         self._db.add(log_entry)
 
-    def _upsert_processing_queue_failure(
-        self,
-        user_id: uuid.UUID,
-        gmail_message_id: str,
-        error: str,
-    ) -> None:
-        """Record or update a failed item in the processing queue."""
-        existing = self._db.scalar(
-            select(ProcessingQueue).where(
-                ProcessingQueue.gmail_message_id == gmail_message_id
-            )
-        )
-
-        if existing is not None:
-            existing.status = "failed"
-            existing.last_error = error
-            existing.retry_count = (existing.retry_count or 0) + 1
-            existing.processed_at = datetime.now(timezone.utc)
-            return
-
-        queue_item = ProcessingQueue(
-            gmail_message_id=gmail_message_id,
-            user_id=user_id,
-            status="failed",
-            priority=1,
-            retry_count=1,
-            last_error=error,
-            processed_at=datetime.now(timezone.utc),
-        )
-        self._db.add(queue_item)
-
     @staticmethod
     def _parse_deadline(deadline: str | date | None) -> date | None:
-        """Normalize classifier deadline into a date for database storage."""
+        """Normalize classifier deadline into a date."""
         if deadline is None:
             return None
         if isinstance(deadline, date) and not isinstance(deadline, datetime):

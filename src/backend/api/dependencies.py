@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from backend.api.auth_dependencies import get_current_user
@@ -27,7 +28,53 @@ __all__ = [
     "get_response_agent",
     "get_analysis_agent",
     "get_scheduling_agent",
+    "require_admin",
+    "check_quota",
+    "increment_request_count",
 ]
+
+
+def require_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Raise 403 if the authenticated user is not an admin."""
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required.",
+        )
+    return current_user
+
+
+def check_quota(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Raise 403 if the account is inactive, 429 if the request quota is exhausted."""
+    if current_user.status != "ACTIVE":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is not active.",
+        )
+    if current_user.request_count >= current_user.max_requests:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Request quota exceeded. "
+                f"Limit: {current_user.max_requests} requests per period."
+            ),
+        )
+    return current_user
+
+
+def increment_request_count(user: User, db: Session) -> None:
+    """Atomically increment request_count by 1 to avoid read-modify-write races."""
+    db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(request_count=User.request_count + 1)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
 
 
 def get_gmail_service(

@@ -26,6 +26,8 @@ from backend.api import (
     emails_router,
     scheduler_router,
     stats_router,
+    tasks_router,
+    users_router,
     websockets_router,
 )
 from backend.core.config import settings
@@ -91,6 +93,7 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 
 app.include_router(admin_router, prefix=API_V1_PREFIX)
+app.include_router(users_router, prefix=API_V1_PREFIX)
 app.include_router(auth_router, prefix=API_V1_PREFIX)
 app.include_router(emails_router, prefix=API_V1_PREFIX)
 app.include_router(agents_router, prefix=API_V1_PREFIX)
@@ -98,6 +101,7 @@ app.include_router(config_router, prefix=API_V1_PREFIX)
 app.include_router(audit_router, prefix=API_V1_PREFIX)
 app.include_router(stats_router, prefix=API_V1_PREFIX)
 app.include_router(scheduler_router, prefix=API_V1_PREFIX)
+app.include_router(tasks_router, prefix=API_V1_PREFIX)
 app.include_router(websockets_router)
 
 
