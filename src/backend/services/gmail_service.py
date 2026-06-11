@@ -327,6 +327,66 @@ class GmailService:
         """Star a message by adding the ``STARRED`` label."""
         return await self.modify_message_labels(message_id, add_labels=["STARRED"])
 
+    async def search_emails(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search the mailbox and return matching emails as normalised dictionaries.
+
+        A thin wrapper around Gmail's search API that accepts standard Gmail
+        query syntax. Suitable for the Chatbot Agent to look up job-offer
+        threads, recruiter messages, or any labelled conversation.
+
+        Args:
+            query: Gmail search string, e.g. ``"subject:job offer is:unread"``
+                or ``"from:recruiter@example.com"``.
+            limit: Maximum number of emails to return. Defaults to ``10``.
+
+        Returns:
+            List of dicts, each containing: ``gmail_message_id``, ``thread_id``,
+            ``subject``, ``sender``, ``recipient``, ``date``, ``body``
+            (plain text), ``body_html``, and ``snippet``.
+
+        Raises:
+            GmailAPIError: When the Gmail search API returns an error.
+        """
+        return await self.fetch_emails(query=query, limit=limit)
+
+    async def get_email_content(self, email_id: str) -> str:
+        """Fetch a single email by its Gmail message ID and return the plain-text body.
+
+        Intended as a direct Chatbot Agent tool: given a ``gmail_message_id``
+        from a previous ``search_emails`` call, returns the full readable text
+        of that message.
+
+        Args:
+            email_id: The Gmail message ID string, e.g. ``"18f2a3b4c5d6e7f8"``.
+                Obtained from the ``gmail_message_id`` field of ``search_emails``
+                results.
+
+        Returns:
+            Plain-text body of the email. Falls back to the Gmail snippet
+            when no plain-text part is available. Returns an ``"Error:"``
+            prefixed string when the message is not found (404) so callers
+            can detect failure without catching exceptions.
+
+        Raises:
+            GmailAPIError: When the Gmail API returns an unexpected error
+                (non-404 failures).
+        """
+        service = await self.get_service()
+        try:
+            full_message = await asyncio.to_thread(
+                lambda: service.users()
+                .messages()
+                .get(userId="me", id=email_id, format="full")
+                .execute()
+            )
+        except HttpError as exc:
+            if getattr(exc.resp, "status", None) == 404:
+                return f"Error: email {email_id} not found."
+            raise self._wrap_http_error(exc, f"Failed to fetch email {email_id}.") from exc
+
+        parsed = self._parse_message(full_message)
+        return parsed.get("body") or parsed.get("snippet") or ""
+
     async def cleanup_spam_folder(self) -> dict[str, Any]:
         """Move all messages in the Gmail SPAM folder to trash.
 

@@ -19,5 +19,7 @@ apscheduler
 chromadb
 PyPDF2
 python-docx
+requests
+beautifulsoup4
 python-multipart
 pytest

@@ -8,6 +8,12 @@ const API_BASE = 'http://localhost:8000/api/v1';
 const AI_REPLY_ICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%234285f4'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z'/%3E%3C/svg%3E";
 
+const TONE_ICON =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%235f6368'%3E%3Cpath d='M2.5 4v3h5v12h3V7h5V4h-13zm19 5h-9v3h3v7h3v-7h3V9z'/%3E%3C/svg%3E";
+
+const TONES = ['Formal', 'Polite', 'Professional', 'Friendly', 'Casual'] as const;
+type Tone = typeof TONES[number];
+
 interface ProcessEmailResult {
   category: string;
   priority_score: number;
@@ -319,6 +325,80 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     let isLoading = false;
     let replyAbortController: AbortController | null = null;
     let replyTaskId: string | null = null;
+    let selectedTone: Tone = 'Professional';
+
+    const composeEl = composeView.getElement() as HTMLElement;
+    composeEl.style.position = 'relative';
+
+    // ── Tone selector panel ──────────────────────────────────────────────────
+    // Mounted to document.body (position:fixed) so Gmail's overflow:hidden cannot clip it.
+    const tonePanel = document.createElement('div');
+    tonePanel.setAttribute('data-ai-tone-panel', '');
+    tonePanel.style.cssText = [
+      'display:none',
+      'position:fixed',
+      'z-index:2147483647',
+      'background:#fff',
+      'border:1px solid #dadce0',
+      'border-radius:8px',
+      'box-shadow:0 4px 12px rgba(0,0,0,.2)',
+      'padding:10px 12px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'min-width:272px',
+    ].join(';');
+
+    const tonePanelLabel = document.createElement('div');
+    tonePanelLabel.style.cssText = 'color:#5f6368;font-size:11px;font-weight:500;margin-bottom:8px';
+    tonePanelLabel.textContent = 'Reply Tone';
+    tonePanel.appendChild(tonePanelLabel);
+
+    const pillRow = document.createElement('div');
+    pillRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px';
+
+    function pillStyle(active: boolean): string {
+      return [
+        'padding:5px 13px',
+        'border-radius:12px',
+        `border:1.5px solid ${active ? '#1a73e8' : '#dadce0'}`,
+        `background:${active ? '#e8f0fe' : '#fff'}`,
+        `color:${active ? '#1a73e8' : '#3c4043'}`,
+        'font-size:12px',
+        'font-family:Google Sans,Roboto,sans-serif',
+        'cursor:pointer',
+        'line-height:1.4',
+        'outline:none',
+      ].join(';');
+    }
+
+    TONES.forEach((tone) => {
+      const pill = document.createElement('button');
+      pill.textContent = tone;
+      pill.style.cssText = pillStyle(tone === selectedTone);
+      pill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        selectedTone = tone;
+        pillRow.querySelectorAll<HTMLButtonElement>('button').forEach((p) => {
+          p.style.cssText = pillStyle(p.textContent === selectedTone);
+        });
+        tonePanel.style.display = 'none';
+      });
+      pillRow.appendChild(pill);
+    });
+
+    tonePanel.appendChild(pillRow);
+    document.body.appendChild(tonePanel);
+
+    const onTonePanelOutsideClick = (e: MouseEvent) => {
+      if (tonePanel.style.display !== 'none' && !tonePanel.contains(e.target as Node)) {
+        tonePanel.style.display = 'none';
+      }
+    };
+    document.addEventListener('mousedown', onTonePanelOutsideClick);
+
+    composeView.on('destroy', () => {
+      tonePanel.remove();
+      document.removeEventListener('mousedown', onTonePanelOutsideClick);
+    });
 
     // ── Stop button ──────────────────────────────────────────────────────────
     const stopBtn = document.createElement('button');
@@ -341,8 +421,6 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
       'box-shadow:0 2px 6px rgba(0,0,0,.15)',
     ].join(';');
 
-    const composeEl = composeView.getElement() as HTMLElement;
-    composeEl.style.position = 'relative';
     composeEl.appendChild(stopBtn);
 
     stopBtn.addEventListener('click', (e) => {
@@ -367,6 +445,24 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
       stopBtn.remove();
     });
 
+    // ── Tone picker button ───────────────────────────────────────────────────
+    composeView.addButton({
+      title: 'Select Reply Tone',
+      iconUrl: TONE_ICON,
+      onClick: () => {
+        if (tonePanel.style.display !== 'none') {
+          tonePanel.style.display = 'none';
+          return;
+        }
+        console.log('[AI Reply] Rendering Tone Menu...');
+        // Position above the compose toolbar, anchored to the compose window's left edge
+        const rect = composeEl.getBoundingClientRect();
+        tonePanel.style.left = `${rect.left + 8}px`;
+        tonePanel.style.bottom = `${window.innerHeight - rect.bottom + 52}px`;
+        tonePanel.style.display = 'block';
+      },
+    });
+
     // ── AI Reply button ──────────────────────────────────────────────────────
     composeView.addButton({
       title: 'AI Reply',
@@ -374,6 +470,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
       onClick: () => {
         if (isLoading) return;
         isLoading = true;
+        tonePanel.style.display = 'none';
 
         const taskId = crypto.randomUUID();
         const controller = new AbortController();
@@ -407,7 +504,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
 
             const { data } = await axios.post<ProcessEmailResult>(
               `${API_BASE}/emails/classify`,
-              { subject, text: threadText || '(no thread body)', sender: '', task_id: taskId },
+              { subject, text: threadText || '(no thread body)', sender: '', task_id: taskId, tone: selectedTone },
               {
                 headers: { Authorization: `Bearer ${token}` },
                 signal: controller.signal,

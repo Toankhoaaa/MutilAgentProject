@@ -72,7 +72,8 @@ Constraints:
   + Confirm decisions, schedules, or action items clearly.
 - Do NOT include markdown fences, XML, or commentary outside the JSON object.
 - Output ONLY valid JSON with keys: "subject", "body_content".
-- Sử dụng giọng văn: {tone}. Thêm chữ ký này vào cuối thư: {signature}
+- You MUST write the entire response (subject line, greeting, body, and closing) using a **{tone}** tone. This is a strict requirement — do not deviate from the requested tone under any circumstances.
+- Thêm chữ ký này vào cuối thư: {signature}
 
 {few_shot}
 

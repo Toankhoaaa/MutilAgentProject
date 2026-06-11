@@ -33,3 +33,40 @@ class RagAgent:
         if not chunks:
             return ""
         return _CHUNK_SEPARATOR.join(chunks)
+
+    def find_user_cv(self) -> str:
+        """Retrieve the user's CV or résumé from the knowledge base.
+
+        Tries progressively broader strategies so the agent always gets
+        the best available match:
+
+        1. Metadata filter ``{"type": {"$in": ["cv", "resume"]}}`` — matches
+           documents explicitly tagged when they were uploaded.
+        2. Metadata filter ``{"source": {"$eq": "cv"}}`` — alternative tagging
+           convention.
+        3. Semantic search with a CV-specific query — catches documents that
+           contain CV content but were not tagged with structured metadata.
+
+        Returns:
+            Concatenated CV text chunks separated by ``\\n---\\n``, ready to
+            be injected into a prompt. Returns an empty string when no
+            CV-like content is found in the knowledge base.
+        """
+        cv_query = "CV resume work experience education skills summary career profile"
+
+        metadata_filters = [
+            {"type": {"$in": ["cv", "resume"]}},
+            {"source": {"$eq": "cv"}},
+        ]
+        for where_filter in metadata_filters:
+            try:
+                chunks = self._chroma.search(cv_query, n_results=5, where=where_filter)
+                if chunks:
+                    return _CHUNK_SEPARATOR.join(chunks)
+            except Exception:
+                # Filter fails when no document in the collection has that field
+                pass
+
+        # Fall back: pure semantic search
+        chunks = self._chroma.search(cv_query, n_results=5)
+        return _CHUNK_SEPARATOR.join(chunks) if chunks else ""

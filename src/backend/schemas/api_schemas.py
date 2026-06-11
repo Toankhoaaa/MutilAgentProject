@@ -6,7 +6,9 @@ from datetime import date, datetime
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_ALLOWED_TONES: frozenset[str] = frozenset({"Formal", "Polite", "Professional", "Friendly", "Casual"})
 
 
 class ClassificationResponse(BaseModel):
@@ -179,6 +181,17 @@ class DraftTestRequest(BaseModel):
     summary: str = Field(..., min_length=1, max_length=500)
     deadline: str | date | None = None
     confidence: float = Field(..., ge=0.0, le=1.0)
+    tone: str = Field(
+        default="Professional",
+        description="Writing tone: Formal, Polite, Professional, Friendly, or Casual.",
+    )
+
+    @field_validator("tone")
+    @classmethod
+    def validate_tone(cls, v: str) -> str:
+        if v not in _ALLOWED_TONES:
+            raise ValueError(f"tone must be one of {sorted(_ALLOWED_TONES)}")
+        return v
 
 
 class ConfigurationResponse(BaseModel):
@@ -329,6 +342,17 @@ class ProcessEmailRequest(BaseModel):
     subject: str = Field(default="", description="Email subject line.")
     sender: str = Field(default="", description="Sender email address.")
     task_id: str | None = Field(default=None, description="Client-generated UUID for cooperative cancellation.")
+    tone: str = Field(
+        default="Professional",
+        description="Writing tone for the AI reply: Formal, Polite, Professional, Friendly, or Casual.",
+    )
+
+    @field_validator("tone")
+    @classmethod
+    def validate_tone(cls, v: str) -> str:
+        if v not in _ALLOWED_TONES:
+            raise ValueError(f"tone must be one of {sorted(_ALLOWED_TONES)}")
+        return v
 
 
 class ProcessEmailResult(BaseModel):

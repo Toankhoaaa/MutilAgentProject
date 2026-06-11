@@ -142,6 +142,7 @@ async def test_draft(
             email_subject=payload.email_subject,
             email_body=payload.email_body,
             classification=classification,
+            tone=payload.tone,
         )
     except ResponseAgentSkippedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

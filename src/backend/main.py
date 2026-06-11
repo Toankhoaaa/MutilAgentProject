@@ -22,6 +22,7 @@ from backend.api import (
     agents_router,
     audit_router,
     auth_router,
+    chat_router,
     config_router,
     emails_router,
     scheduler_router,
@@ -97,6 +98,7 @@ app.include_router(users_router, prefix=API_V1_PREFIX)
 app.include_router(auth_router, prefix=API_V1_PREFIX)
 app.include_router(emails_router, prefix=API_V1_PREFIX)
 app.include_router(agents_router, prefix=API_V1_PREFIX)
+app.include_router(chat_router, prefix=API_V1_PREFIX)
 app.include_router(config_router, prefix=API_V1_PREFIX)
 app.include_router(audit_router, prefix=API_V1_PREFIX)
 app.include_router(stats_router, prefix=API_V1_PREFIX)

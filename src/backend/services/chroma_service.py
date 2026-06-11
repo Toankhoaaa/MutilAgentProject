@@ -27,18 +27,37 @@ class ChromaService:
         )
         logger.info("ChromaDB ready at %s (collection=%s)", path, _COLLECTION_NAME)
 
-    def search(self, query: str, n_results: int = 3) -> list[str]:
+    def search(
+        self,
+        query: str,
+        n_results: int = 3,
+        where: dict | None = None,
+    ) -> list[str]:
         """Return up to *n_results* document chunks most similar to *query*.
 
-        Returns an empty list when the collection has no documents.
+        Args:
+            query: Natural-language search string.
+            n_results: Maximum number of chunks to return.
+            where: Optional ChromaDB metadata filter, e.g.
+                ``{"type": {"$in": ["cv", "resume"]}}``. Only documents
+                whose metadata satisfies the filter are considered.
+                Pass ``None`` (default) to search the full collection.
+
+        Returns:
+            List of matching document strings. Empty when the collection
+            has no documents or when the ``where`` filter matches nothing.
         """
         count = self._collection.count()
         if count == 0:
             return []
+        kwargs: dict = {}
+        if where:
+            kwargs["where"] = where
         results = self._collection.query(
             query_texts=[query],
             n_results=min(n_results, count),
             include=["documents"],
+            **kwargs,
         )
         return [d for d in (results.get("documents") or [[]])[0] if d]
 

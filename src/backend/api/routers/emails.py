@@ -139,7 +139,7 @@ async def classify_email(
             user_id=current_user.id,
             task_id=task_id,
         )
-        result = await orchestrator.process_one_stateless(raw_email)
+        result = await orchestrator.process_one_stateless(raw_email, tone_override=payload.tone)
         increment_request_count(current_user, db)
         return ProcessEmailResult.model_validate(result)
     except asyncio.CancelledError:

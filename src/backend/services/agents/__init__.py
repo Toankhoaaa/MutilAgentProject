@@ -1,3 +1,4 @@
+from backend.services.agents.chat_agent import ChatbotAgent, ChatbotAgentError
 from backend.services.agents.analysis_agent import (
     AnalysisAgentError,
     AnalysisParseError,
@@ -20,6 +21,8 @@ from backend.services.agents.security_agent import (
 )
 
 __all__ = [
+    "ChatbotAgent",
+    "ChatbotAgentError",
     "EmailAnalysisAgent",
     "AnalysisAgentError",
     "AnalysisParseError",

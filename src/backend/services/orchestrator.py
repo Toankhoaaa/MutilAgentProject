@@ -284,7 +284,7 @@ class EmailOrchestrator:
         return summary
 
     async def process_one_stateless(
-        self, raw_email: dict[str, Any]
+        self, raw_email: dict[str, Any], tone_override: str | None = None
     ) -> dict[str, Any]:
         """Classify a single email and optionally draft a reply with no DB writes."""
         self._check_cancelled()
@@ -303,6 +303,8 @@ class EmailOrchestrator:
         self._check_cancelled()
         if EmailResponseAgent.is_eligible(classification.category):
             tone, signature = self._load_agent_customization()
+            if tone_override:
+                tone = tone_override
             rag_context = self._rag.retrieve(
                 raw_email.get("body") or raw_email.get("snippet") or ""
             )
