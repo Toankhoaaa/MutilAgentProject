@@ -92,6 +92,7 @@ class EmailOrchestrator:
             "llm_calls_count": 0,
             "llm_total_time_ms": 0,
             "total_time_ms": 0,
+            "processed_emails": [],
         }
 
         batch_started = time.monotonic()
@@ -174,12 +175,24 @@ class EmailOrchestrator:
                             }
                         )
 
+                    email_detail: dict[str, Any] = {
+                        "gmail_message_id": gmail_message_id,
+                        "subject": raw_email.get("subject"),
+                        "sender": raw_email.get("sender"),
+                        "category": classification_output.category.value,
+                        "priority_score": classification_output.priority_score,
+                        "summary": classification_output.summary,
+                        "confidence": classification_output.confidence,
+                        "draft_subject": None,
+                        "has_draft": False,
+                    }
+
                     self._check_cancelled()
                     if EmailResponseAgent.is_eligible(classification_output.category):
                         rag_context = self._rag.retrieve(
                             raw_email.get("body") or raw_email.get("snippet") or ""
                         )
-                        draft_gmail_id, draft_ms = await self._create_draft(
+                        draft_gmail_id, draft_subject, draft_ms = await self._create_draft(
                             raw_email=raw_email,
                             classification=classification_output,
                             rag_context=rag_context,
@@ -187,6 +200,8 @@ class EmailOrchestrator:
                         llm_calls_count += 1
                         llm_total_time_ms += draft_ms or 0
                         summary["drafts_created"] += 1
+                        email_detail["has_draft"] = True
+                        email_detail["draft_subject"] = draft_subject
                         self._audit(
                             user_id=user_id,
                             agent_name=_AGENT_RESPONSE,
@@ -212,6 +227,7 @@ class EmailOrchestrator:
 
                     self._db.commit()
                     summary["processed"] += 1
+                    summary["processed_emails"].append(email_detail)
 
                 except asyncio.CancelledError:
                     raise
@@ -518,7 +534,7 @@ class EmailOrchestrator:
         raw_email: dict[str, Any],
         classification: EmailClassificationOutput,
         rag_context: str = "",
-    ) -> tuple[str, int]:
+    ) -> tuple[str, str, int]:
         """Generate a reply via the response agent and create a Gmail draft."""
         started = time.monotonic()
         tone, signature = self._load_agent_customization()
@@ -547,7 +563,7 @@ class EmailOrchestrator:
         )
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        return draft_gmail_id, elapsed_ms
+        return draft_gmail_id, reply.subject, elapsed_ms
 
     def _load_agent_customization(self) -> tuple[str, str]:
         """Load agent tone and user signature from ``configurations``."""

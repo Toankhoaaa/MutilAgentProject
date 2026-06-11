@@ -102,6 +102,31 @@ class DraftUpdateSchema(BaseModel):
     draft_content: str = Field(..., min_length=1, description="Updated plain-text draft body.")
 
 
+class GmailEmailItem(BaseModel):
+    """A single Gmail message returned by the list endpoint (no DB persistence)."""
+
+    gmail_message_id: str
+    thread_id: str | None = None
+    subject: str | None = None
+    sender: str | None = None
+    date: str | None = None
+    snippet: str | None = None
+
+
+class ProcessedEmailDetail(BaseModel):
+    """Per-email result from the AI processing pipeline (no DB persistence)."""
+
+    gmail_message_id: str
+    subject: str | None = None
+    sender: str | None = None
+    category: str
+    priority_score: int
+    summary: str
+    confidence: float
+    draft_subject: str | None = None
+    has_draft: bool = False
+
+
 class ProcessEmailsResponse(BaseModel):
     """Result of triggering the email orchestrator batch."""
 
@@ -115,6 +140,7 @@ class ProcessEmailsResponse(BaseModel):
     llm_total_time_ms: int = 0
     total_time_ms: int = 0
     errors: list[dict[str, object]] = Field(default_factory=list)
+    processed_emails: list[ProcessedEmailDetail] = Field(default_factory=list)
 
 
 class DraftSendResponse(BaseModel):

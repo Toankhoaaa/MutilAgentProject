@@ -93,6 +93,27 @@ export interface AgentStatus {
   message: string | null;
 }
 
+export interface GmailEmailItem {
+  gmail_message_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  sender: string | null;
+  date: string | null;
+  snippet: string | null;
+}
+
+export interface ProcessedEmailDetail {
+  gmail_message_id: string;
+  subject: string | null;
+  sender: string | null;
+  category: string;
+  priority_score: number;
+  summary: string;
+  confidence: number;
+  draft_subject: string | null;
+  has_draft: boolean;
+}
+
 export interface ProcessEmailsResult {
   fetched: number;
   processed: number;
@@ -104,6 +125,7 @@ export interface ProcessEmailsResult {
   llm_total_time_ms: number;
   total_time_ms: number;
   errors: Record<string, unknown>[];
+  processed_emails: ProcessedEmailDetail[];
 }
 
 export interface SchedulerStatus {

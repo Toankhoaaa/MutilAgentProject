@@ -22,6 +22,7 @@ from backend.core import task_manager
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory
 from backend.schemas.api_schemas import (
+    GmailEmailItem,
     ProcessEmailRequest,
     ProcessEmailResult,
     ProcessEmailsResponse,
@@ -81,6 +82,27 @@ async def batch_process_emails(
         raise HTTPException(status_code=499, detail="Processing was cancelled by the user.")
     finally:
         task_manager.remove_task(task_id)
+
+
+@router.get(
+    "/list",
+    response_model=list[GmailEmailItem],
+    summary="Fetch inbox emails from Gmail (no DB persistence)",
+    description="Fetches emails directly from Gmail and returns them. Nothing is written to the database.",
+)
+async def list_emails(
+    limit: int = 20,
+    query: str = "in:inbox",
+    gmail_service: GmailService = Depends(get_gmail_service),
+    _: User = Depends(get_current_user),
+) -> list[dict]:
+    """Return raw Gmail inbox emails without any DB persistence."""
+    try:
+        return await gmail_service.fetch_emails(query=query, limit=limit)
+    except GmailAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except GmailAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post(

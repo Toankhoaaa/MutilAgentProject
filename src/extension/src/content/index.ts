@@ -23,12 +23,21 @@ interface ProcessEmailResult {
   draft_subject: string | null;
 }
 
-function escapeHtml(text: string): string {
+function escapeHtml(text: string | null | undefined): string {
+  if (!text) return '';
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\n/g, '<br>');
+}
+
+function safeSetBodyHTML(view: InboxSDK.ComposeView, html: string): void {
+  try {
+    view.setBodyHTML(html);
+  } catch (e) {
+    console.warn('[AI Reply] setBodyHTML failed (compose may be closing):', e);
+  }
 }
 
 // ── Snippet Engine ────────────────────────────────────────────────────────
@@ -478,7 +487,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
         replyTaskId = taskId;
         stopBtn.style.display = 'block';
 
-        composeView.setBodyHTML('<p><em>⏳ Generating AI reply…</em></p>');
+        safeSetBodyHTML(composeView,'<p><em>⏳ Generating AI reply…</em></p>');
 
         void (async () => {
           try {
@@ -496,7 +505,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
             const stored = await chrome.storage.local.get('ai_reply_token');
             const token = stored['ai_reply_token'] as string | undefined;
             if (!token) {
-              composeView.setBodyHTML(
+              safeSetBodyHTML(composeView,
                 '<p><em>❌ No API token saved. Open the extension popup and save your token first.</em></p>',
               );
               return;
@@ -512,13 +521,13 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
             );
 
             const reply = data.draft_content ?? data.summary;
-            composeView.setBodyHTML(`<p>${escapeHtml(reply)}</p>`);
+            safeSetBodyHTML(composeView,`<p>${escapeHtml(reply)}</p>`);
           } catch (err) {
             if (axios.isCancel(err)) {
-              composeView.setBodyHTML('<p><em>🛑 Đã hủy tạo nội dung.</em></p>');
+              safeSetBodyHTML(composeView,'<p><em>🛑 Đã hủy tạo nội dung.</em></p>');
             } else {
               console.error('[AI Reply] API call failed:', err);
-              composeView.setBodyHTML(
+              safeSetBodyHTML(composeView,
                 '<p><em>❌ AI Reply failed — check the console for details.</em></p>',
               );
             }
