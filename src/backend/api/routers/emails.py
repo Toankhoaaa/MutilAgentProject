@@ -3,37 +3,50 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from backend.api.auth_dependencies import get_current_user
 from backend.api.dependencies import (
     check_quota,
+    get_analysis_agent,
     get_classifier_agent,
     get_db,
     get_gmail_service,
     get_response_agent,
+    get_scheduling_agent,
     increment_request_count,
 )
 from backend.core import task_manager
+from backend.core.websocket_manager import manager
+from backend.models.email_scheduling import EmailScheduling
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory
 from backend.schemas.api_schemas import (
+    AnalyzeEmailRequest,
+    AnalyzeEmailResponse,
+    EventDetailsResponse,
     GmailEmailItem,
     ProcessEmailRequest,
     ProcessEmailResult,
     ProcessEmailsResponse,
+    ScheduleEventResponse,
 )
 from backend.services.agents import (
+    EmailAnalysisAgent,
     EmailClassifierAgent,
     EmailResponseAgent,
+    EmailSchedulingAgent,
 )
 from backend.services.gmail_service import GmailAPIError, GmailAuthenticationError, GmailService
 from backend.services.orchestrator import EmailOrchestrator
-from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -254,3 +267,135 @@ async def cleanup_inbox(
         raise HTTPException(status_code=499, detail="Cleanup was cancelled by the user.")
     finally:
         task_manager.remove_task(task_id)
+
+
+@router.post(
+    "/analyze",
+    response_model=AnalyzeEmailResponse,
+    summary="AI analysis of a single email (stateless + optional event persistence)",
+    description=(
+        "Runs AnalysisAgent (summary, sentiment, action items) and SchedulingAgent "
+        "(meeting detection) in parallel. If a scheduling intent is detected, the "
+        "structured event metadata is persisted to ``email_schedulings`` and a "
+        "real-time WebSocket event is broadcast. Raw email body is never stored."
+    ),
+)
+async def analyze_email(
+    payload: AnalyzeEmailRequest,
+    current_user: User = Depends(check_quota),
+    db: Session = Depends(get_db),
+    analysis_agent: EmailAnalysisAgent = Depends(get_analysis_agent),
+    scheduling_agent: EmailSchedulingAgent = Depends(get_scheduling_agent),
+) -> AnalyzeEmailResponse:
+    """Deep-analyze an email and optionally persist a detected calendar event."""
+    analysis_result, scheduling_result = await asyncio.gather(
+        analysis_agent.analyze(
+            email_subject=payload.subject,
+            email_body=payload.body,
+            email_sender=payload.sender,
+        ),
+        scheduling_agent.extract_schedule(
+            email_subject=payload.subject,
+            email_body=payload.body,
+            sender=payload.sender or "",
+        ),
+    )
+
+    has_event = scheduling_result.is_meeting_request and scheduling_result.action is not None
+    event_details: EventDetailsResponse | None = None
+    scheduling_id: str | None = None
+
+    if has_event:
+        action = scheduling_result.action
+        # action.start_time / action.end_time are timezone-aware datetime objects
+        # validated by Pydantic — guaranteed ISO-8601 compliant on serialisation.
+        start_iso = action.start_time.isoformat()
+        end_iso = action.end_time.isoformat()
+
+        event_details = EventDetailsResponse(
+            event_title=scheduling_result.event_summary,
+            start_time=start_iso,
+            end_time=end_iso,
+            attendees=action.attendees,
+        )
+
+        row = EmailScheduling(
+            event_title=scheduling_result.event_summary,
+            start_datetime=action.start_time,
+            end_datetime=action.end_time,
+            attendees_json=json.dumps(action.attendees),
+            suggested_reply=scheduling_result.suggested_reply or None,
+            status="PENDING",
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        scheduling_id = str(row.id)
+
+        await manager.broadcast({
+            "type": "NEW_CALENDAR_EVENT",
+            "event_title": scheduling_result.event_summary,
+            "start_time": start_iso,
+            "scheduling_id": scheduling_id,
+        })
+
+    increment_request_count(current_user, db)
+    return AnalyzeEmailResponse(
+        summary=analysis_result.summary,
+        sentiment=analysis_result.sentiment,
+        action_items=analysis_result.action_items,
+        translation=analysis_result.translation,
+        detected_language=analysis_result.detected_language,
+        has_event=has_event,
+        event_details=event_details,
+        scheduling_id=scheduling_id,
+    )
+
+
+@router.get(
+    "/scheduled-events",
+    response_model=list[ScheduleEventResponse],
+    summary="List persisted calendar events extracted from emails",
+    description="Returns all rows from ``email_schedulings``, newest first.",
+)
+def list_scheduled_events(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[ScheduleEventResponse]:
+    """Return all saved scheduling events ordered by creation time descending."""
+    rows = db.scalars(
+        select(EmailScheduling).order_by(EmailScheduling.created_at.desc())
+    ).all()
+    return [
+        ScheduleEventResponse(
+            id=str(row.id),
+            title=row.event_title or "(Không có tiêu đề)",
+            startTime=row.start_datetime.isoformat() if row.start_datetime else "",
+            endTime=row.end_datetime.isoformat() if row.end_datetime else "",
+            attendees=row.attendees,
+            status=row.status,
+            emailSnippet=row.event_title or "",
+            alternativeSlots=[],
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/scheduled-events/{scheduling_id}/confirm",
+    summary="Confirm a pending calendar event",
+    description="Marks an ``email_schedulings`` row as CONFIRMED.",
+)
+def confirm_scheduled_event(
+    scheduling_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    """Mark a scheduling event as confirmed."""
+    row = db.get(EmailScheduling, scheduling_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+    row.status = "CONFIRMED"
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"message": "Event confirmed.", "id": str(row.id)}

@@ -21,7 +21,7 @@ export default function SchedulesPage() {
   });
 
   const { data: events, isLoading, error: fetchError, mutate } =
-    useSWR<ScheduleEvent[]>("/schedules", fetcher);
+    useSWR<ScheduleEvent[]>("/emails/scheduled-events", fetcher);
 
   if (authError) return null;
 
@@ -33,7 +33,7 @@ export default function SchedulesPage() {
     if (!selected) return;
     setConfirming(true);
     try {
-      await api.post(`/schedules/${selected.id}/confirm`);
+      await api.post(`/emails/scheduled-events/${selected.id}/confirm`);
       const updated: ScheduleEvent = { ...selected, status: "CONFIRMED" };
       setSelected(updated);
       mutate((prev) => prev?.map((e) => (e.id === selected.id ? updated : e)), false);

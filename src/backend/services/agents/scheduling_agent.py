@@ -347,6 +347,7 @@ class EmailSchedulingAgent:
                     "sender": sender,
                     "email_subject": email_subject,
                     "email_body": email_body,
+                    "meet_link": "{{meet_link}}",
                 }
             )
         except Exception as exc:

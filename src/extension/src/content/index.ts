@@ -11,6 +11,9 @@ const AI_REPLY_ICON =
 const TONE_ICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%235f6368'%3E%3Cpath d='M2.5 4v3h5v12h3V7h5V4h-13zm19 5h-9v3h3v7h3v-7h3V9z'/%3E%3C/svg%3E";
 
+const AI_ANALYSIS_ICON =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230f9d58'%3E%3Cpath d='M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z'/%3E%3C/svg%3E";
+
 const TONES = ['Formal', 'Polite', 'Professional', 'Friendly', 'Casual'] as const;
 type Tone = typeof TONES[number];
 
@@ -323,6 +326,184 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     const id = await threadView.getThreadIDAsync();
     threadViews.set(id, threadView);
     threadView.on('destroy', () => threadViews.delete(id));
+  });
+
+  // ── AI Analysis button (thread toolbar — visible, not hidden in overflow) ──
+
+  interface AnalyzeResponse {
+    summary: string[];
+    sentiment: string;
+    action_items: string[];
+    translation: string | null;
+    detected_language: string;
+    has_event: boolean;
+    event_details: { event_title: string | null; start_time: string | null; end_time: string | null; attendees: string[] } | null;
+  }
+
+  function sentimentColor(s: string): string {
+    if (s === 'Positive') return '#0f9d58';
+    if (s === 'Negative') return '#d93025';
+    return '#5f6368';
+  }
+
+  function formatIso(iso: string | null): string {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toLocaleString('vi-VN', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
+    } catch { return iso; }
+  }
+
+  // Single floating panel shared across all threads
+  const summaryPanel = document.createElement('div');
+  summaryPanel.setAttribute('data-ai-summary-panel', '');
+  summaryPanel.style.cssText = [
+    'display:none',
+    'position:fixed',
+    'z-index:2147483647',
+    'background:#fff',
+    'border:1px solid #dadce0',
+    'border-radius:12px',
+    'box-shadow:0 4px 16px rgba(0,0,0,.18)',
+    'padding:16px 18px',
+    'font-family:Google Sans,Roboto,sans-serif',
+    'min-width:320px',
+    'max-width:420px',
+    'max-height:70vh',
+    'overflow-y:auto',
+    'right:24px',
+    'top:80px',
+  ].join(';');
+
+  const summaryCloseBtn = document.createElement('button');
+  summaryCloseBtn.innerHTML = '&times;';
+  summaryCloseBtn.title = 'Đóng';
+  summaryCloseBtn.style.cssText = [
+    'position:absolute',
+    'top:10px',
+    'right:12px',
+    'background:none',
+    'border:none',
+    'font-size:18px',
+    'color:#5f6368',
+    'cursor:pointer',
+    'line-height:1',
+  ].join(';');
+  summaryCloseBtn.addEventListener('click', () => { summaryPanel.style.display = 'none'; });
+  summaryPanel.appendChild(summaryCloseBtn);
+
+  const panelContent = document.createElement('div');
+  summaryPanel.appendChild(panelContent);
+  document.body.appendChild(summaryPanel);
+
+  function renderLoading(): void {
+    panelContent.innerHTML = [
+      '<div style="display:flex;align-items:center;gap:10px;color:#5f6368;font-size:13px;padding:8px 0">',
+      '<svg style="width:18px;height:18px;animation:spin 1s linear infinite" viewBox="0 0 24 24" fill="none">',
+      '<circle cx="12" cy="12" r="10" stroke="#dadce0" stroke-width="3"/>',
+      '<path d="M12 2a10 10 0 0 1 10 10" stroke="#1a73e8" stroke-width="3" stroke-linecap="round"/>',
+      '</svg>Đang phân tích email...</div>',
+      '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>',
+    ].join('');
+  }
+
+  function renderError(msg: string): void {
+    panelContent.innerHTML = `<div style="color:#d93025;font-size:13px;padding:8px 0">❌ ${escapeHtml(msg)}</div>`;
+  }
+
+  function renderResult(data: AnalyzeResponse): void {
+    const summaryHtml = data.summary
+      .map((b) => `<li style="margin-bottom:4px">${escapeHtml(b)}</li>`)
+      .join('');
+
+    const actionHtml = data.action_items.length
+      ? `<div style="margin-top:12px">
+          <div style="font-size:11px;font-weight:600;color:#5f6368;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Hành động cần làm</div>
+          <ul style="margin:0;padding-left:18px;font-size:13px;color:#3c4043">
+            ${data.action_items.map((a) => `<li style="margin-bottom:3px">${escapeHtml(a)}</li>`).join('')}
+          </ul>
+        </div>`
+      : '';
+
+    const eventHtml = data.has_event && data.event_details
+      ? `<div style="margin-top:14px;background:#e8f5e9;border:1px solid #a8d5b5;border-radius:8px;padding:12px">
+          <div style="font-size:11px;font-weight:600;color:#0f9d58;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📅 Lịch hẹn phát hiện</div>
+          <div style="font-size:13px;font-weight:600;color:#1e4620;margin-bottom:6px">${escapeHtml(data.event_details.event_title ?? '')}</div>
+          <div style="font-size:12px;color:#2e7d32">
+            🕐 ${escapeHtml(formatIso(data.event_details.start_time))} – ${escapeHtml(formatIso(data.event_details.end_time))}
+          </div>
+          ${data.event_details.attendees.length
+            ? `<div style="font-size:12px;color:#2e7d32;margin-top:4px">👥 ${data.event_details.attendees.map(escapeHtml).join(', ')}</div>`
+            : ''}
+          <div style="font-size:11px;color:#4caf50;margin-top:6px;font-style:italic">✓ Đã lưu vào lịch trình</div>
+        </div>`
+      : '';
+
+    const translationHtml = data.translation
+      ? `<div style="margin-top:12px;padding:10px;background:#f8f9fa;border-radius:6px;font-size:12px;color:#5f6368;font-style:italic">${escapeHtml(data.translation)}</div>`
+      : '';
+
+    panelContent.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <span style="font-size:14px;font-weight:600;color:#202124">AI Analysis</span>
+        <span style="font-size:11px;font-weight:600;color:${sentimentColor(data.sentiment)};background:${sentimentColor(data.sentiment)}1a;padding:2px 8px;border-radius:10px">${escapeHtml(data.sentiment)}</span>
+      </div>
+      <div style="font-size:11px;font-weight:600;color:#5f6368;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Tóm tắt</div>
+      <ul style="margin:0;padding-left:18px;font-size:13px;color:#3c4043">${summaryHtml}</ul>
+      ${actionHtml}
+      ${translationHtml}
+      ${eventHtml}
+    `;
+  }
+
+  sdk.Toolbars.registerThreadButton({
+    title: 'AI Analysis',
+    iconUrl: AI_ANALYSIS_ICON,
+    positions: ['THREAD'],
+    onClick(event) {
+      if (summaryPanel.style.display !== 'none') {
+        summaryPanel.style.display = 'none';
+        return;
+      }
+      summaryPanel.style.display = 'block';
+      renderLoading();
+
+      const threadView = event.selectedThreadViews[0];
+      if (!threadView) {
+        renderError('Không tìm thấy thread.');
+        return;
+      }
+
+      const subject = threadView.getSubject();
+      const messages = threadView.getMessageViews();
+      const latestMessage = messages[messages.length - 1];
+      const body = latestMessage?.getBodyElement()?.innerText ?? '';
+      const sender = latestMessage?.getSender()?.emailAddress ?? '';
+
+      (async () => {
+        const stored = await chrome.storage.local.get('ai_reply_token');
+        const token = stored['ai_reply_token'] as string | undefined;
+        if (!token) {
+          renderError('No API token saved. Open the extension popup and save your token first.');
+          return;
+        }
+        // Route through service worker to avoid Mixed-Content block (HTTPS page → HTTP localhost)
+        const response = await new Promise<{ ok: boolean; data?: AnalyzeResponse; error?: string }>(
+          (resolve) => chrome.runtime.sendMessage(
+            { type: 'ANALYZE_EMAIL', subject, body: body || '(no body)', sender, token },
+            resolve,
+          ),
+        );
+        if (!response.ok) {
+          console.error('[AI Analysis] API call failed:', response.error);
+          renderError('Analysis failed — check the console for details.');
+          return;
+        }
+        renderResult(response.data!);
+      })();
+    },
   });
 
   sdk.Compose.registerComposeViewHandler((composeView) => {

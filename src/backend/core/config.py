@@ -36,7 +36,11 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
     CHROMA_PERSIST_PATH: str = "./chroma_db"
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=[".env", "../.env"],
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     @field_validator("GEMINI_MODEL", mode="before")
     @classmethod

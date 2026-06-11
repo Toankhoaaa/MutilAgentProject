@@ -108,9 +108,15 @@ def get_response_agent() -> EmailResponseAgent:
 
 def get_analysis_agent() -> EmailAnalysisAgent:
     """Provide the email deep-analysis agent."""
-    return EmailAnalysisAgent()
+    try:
+        return EmailAnalysisAgent()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 def get_scheduling_agent() -> EmailSchedulingAgent:
     """Provide the scheduling extraction agent."""
-    return EmailSchedulingAgent()
+    try:
+        return EmailSchedulingAgent()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc

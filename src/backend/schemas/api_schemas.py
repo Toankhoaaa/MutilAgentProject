@@ -279,6 +279,49 @@ class UserSignatureUpdateSchema(BaseModel):
     signature: str = Field(..., min_length=1, description="Signature block for reply emails.")
 
 
+class AnalyzeEmailRequest(BaseModel):
+    """Request payload for the stateless email analysis endpoint."""
+
+    subject: str = Field(..., min_length=1, max_length=500)
+    body: str = Field(..., min_length=1)
+    sender: str | None = Field(default=None, max_length=255)
+
+
+class EventDetailsResponse(BaseModel):
+    """Structured calendar event extracted from the email."""
+
+    event_title: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    attendees: list[str] = Field(default_factory=list)
+
+
+class AnalyzeEmailResponse(BaseModel):
+    """Unified analysis + scheduling result returned by POST /emails/analyze."""
+
+    summary: list[str]
+    sentiment: str
+    action_items: list[str]
+    translation: str | None = None
+    detected_language: str
+    has_event: bool
+    event_details: EventDetailsResponse | None = None
+    scheduling_id: str | None = None
+
+
+class ScheduleEventResponse(BaseModel):
+    """A single scheduling row shaped for the frontend ScheduleEvent interface."""
+
+    id: str
+    title: str
+    startTime: str
+    endTime: str
+    attendees: list[str]
+    status: str
+    emailSnippet: str
+    alternativeSlots: list[str] = Field(default_factory=list)
+
+
 class AuthLoginResponse(BaseModel):
     """Google OAuth authorization URL for the frontend redirect."""
 
