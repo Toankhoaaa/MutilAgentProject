@@ -156,6 +156,53 @@ body {
   background: var(--color-accent-hover);
 }
 
+/* ─── Admin sidebar dark theme ─── */
+.sidebar--admin {
+  background: #1E1B4B;
+  border-right-color: rgba(255, 255, 255, 0.08);
+}
+.sidebar--admin .sidebar-logo {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+.sidebar--admin .sidebar-section-label {
+  color: #6366F1;
+}
+.sidebar--admin .sidebar-item {
+  color: #94A3B8;
+}
+.sidebar--admin .sidebar-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #E2E8F0;
+}
+.sidebar--admin .sidebar-item-active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818CF8;
+}
+.sidebar--admin .sidebar-item-active::before {
+  background: #818CF8;
+}
+.sidebar--admin .sidebar-item-active:hover {
+  background: rgba(99, 102, 241, 0.2);
+  color: #818CF8;
+}
+.sidebar--admin .sidebar-footer {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-admin-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  background: rgba(99, 102, 241, 0.2);
+  color: #818CF8;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 9999px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
 /* ─── Main area ─── */
 .main-area {
   flex: 1;
@@ -483,6 +530,10 @@ body {
 }
 .toast-urgent {
   border-left: 3px solid #f87171;
+}
+.toast-security {
+  border-left: 3px solid #ef4444;
+  background: #450a0a;
 }
 .toast-title {
   font-size: 0.8125rem;

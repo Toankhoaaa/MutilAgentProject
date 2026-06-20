@@ -61,7 +61,29 @@ class ChromaService:
         )
         return [d for d in (results.get("documents") or [[]])[0] if d]
 
-    def add_documents(self, texts: list[str], ids: list[str]) -> None:
-        """Upsert *texts* with corresponding *ids* into the collection."""
-        self._collection.upsert(documents=texts, ids=ids)
+    def add_documents(
+        self,
+        texts: list[str],
+        ids: list[str],
+        metadatas: list[dict] | None = None,
+    ) -> None:
+        """Upsert *texts* with corresponding *ids* into the collection.
+
+        Args:
+            texts: Document strings to embed.
+            ids: Unique string identifiers, one per text.
+            metadatas: Optional metadata dicts, one per text. Stored alongside
+                embeddings and usable as ``where`` filters in subsequent searches.
+        """
+        kwargs: dict = {"documents": texts, "ids": ids}
+        if metadatas:
+            kwargs["metadatas"] = metadatas
+        self._collection.upsert(**kwargs)
         logger.info("Upserted %d documents into ChromaDB.", len(texts))
+
+    def delete_documents(self, ids: list[str]) -> None:
+        """Delete documents with the given *ids* from the collection."""
+        if not ids:
+            return
+        self._collection.delete(ids=ids)
+        logger.info("Deleted %d documents from ChromaDB.", len(ids))

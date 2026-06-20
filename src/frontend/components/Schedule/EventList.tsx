@@ -31,6 +31,13 @@ const statusConfig: Record<
     border: "border-rose-200",
     dot: "bg-rose-400",
   },
+  CANCELLED: {
+    label: "Đã huỷ",
+    bg: "bg-slate-100",
+    text: "text-slate-500",
+    border: "border-slate-200",
+    dot: "bg-slate-400",
+  },
 };
 
 function formatTime(iso: string): string {

@@ -25,6 +25,8 @@ from backend.api import (
     chat_router,
     config_router,
     emails_router,
+    knowledge_router,
+    rules_router,
     scheduler_router,
     stats_router,
     tasks_router,
@@ -33,7 +35,7 @@ from backend.api import (
 )
 from backend.core.config import settings
 from backend.core.database import init_db
-from backend.core.scheduler import start_scheduler, stop_scheduler
+from backend.core.scheduler import restore_snooze_jobs, start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ APP_VERSION = "1.0.0"
 async def lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
     start_scheduler()
+    await restore_snooze_jobs()
     yield
     stop_scheduler()
 
@@ -101,6 +104,8 @@ app.include_router(agents_router, prefix=API_V1_PREFIX)
 app.include_router(chat_router, prefix=API_V1_PREFIX)
 app.include_router(config_router, prefix=API_V1_PREFIX)
 app.include_router(audit_router, prefix=API_V1_PREFIX)
+app.include_router(knowledge_router, prefix=API_V1_PREFIX)
+app.include_router(rules_router, prefix=API_V1_PREFIX)
 app.include_router(stats_router, prefix=API_V1_PREFIX)
 app.include_router(scheduler_router, prefix=API_V1_PREFIX)
 app.include_router(tasks_router, prefix=API_V1_PREFIX)

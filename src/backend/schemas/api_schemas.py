@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -125,6 +125,9 @@ class ProcessedEmailDetail(BaseModel):
     confidence: float
     draft_subject: str | None = None
     has_draft: bool = False
+    is_safe: bool = True
+    security_risk_level: str | None = None
+    security_warnings: list[str] = Field(default_factory=list)
 
 
 class ProcessEmailsResponse(BaseModel):
@@ -241,28 +244,6 @@ class ConfigurationUpdateSchema(BaseModel):
 
 
 class AgentToneUpdateSchema(BaseModel):
-    """Set the response agent writing tone."""
-
-    tone: str = Field(
-        ...,
-        min_length=1,
-        max_length=50,
-        description='Tone preset, e.g. "professional", "friendly", "concise".',
-    )
-
-
-class UserSignatureUpdateSchema(BaseModel):
-    """Set the email signature appended to AI drafts."""
-
-    signature: str = Field(
-        ...,
-        min_length=1,
-        max_length=1000,
-        description="Plain-text signature block appended to reply emails.",
-    )
-
-
-class AgentToneUpdateSchema(BaseModel):
     """Update the response agent writing tone."""
 
     tone: str = Field(
@@ -276,7 +257,12 @@ class AgentToneUpdateSchema(BaseModel):
 class UserSignatureUpdateSchema(BaseModel):
     """Update the email signature appended to AI drafts."""
 
-    signature: str = Field(..., min_length=1, description="Signature block for reply emails.")
+    signature: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="Plain-text signature block appended to reply emails.",
+    )
 
 
 class AnalyzeEmailRequest(BaseModel):
@@ -307,6 +293,9 @@ class AnalyzeEmailResponse(BaseModel):
     has_event: bool
     event_details: EventDetailsResponse | None = None
     scheduling_id: str | None = None
+    is_safe: bool = True
+    risk_level: Literal["low", "medium", "high"] = "low"
+    warnings: list[str] = []
 
 
 class ScheduleEventResponse(BaseModel):
@@ -320,6 +309,9 @@ class ScheduleEventResponse(BaseModel):
     status: str
     emailSnippet: str
     alternativeSlots: list[str] = Field(default_factory=list)
+    html_link: str | None = None
+    meet_link: str | None = None
+    is_synced: bool = False
 
 
 class AuthLoginResponse(BaseModel):
@@ -347,6 +339,7 @@ class UserProfileResponse(BaseModel):
     email: str
     display_name: str | None = None
     is_active: bool
+    is_admin: bool = False
 
 
 class EmailAnalysisResponse(BaseModel):
@@ -433,3 +426,24 @@ class ProcessEmailResult(BaseModel):
     confidence: float
     draft_content: str | None = None
     draft_subject: str | None = None
+    is_safe: bool = True
+    security_risk_level: str | None = None
+    security_warnings: list[str] = Field(default_factory=list)
+
+
+class QuickClassifyItem(BaseModel):
+    """A single thread to classify in a lightweight batch request."""
+
+    thread_id: str
+    subject: str
+    snippet: str = ""
+    sender: str | None = None
+
+
+class QuickClassifyResult(BaseModel):
+    """Lightweight classification result for a single thread (no draft, no DB write)."""
+
+    thread_id: str
+    category: str
+    priority_score: int
+    confidence: float

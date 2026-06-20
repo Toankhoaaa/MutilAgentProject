@@ -23,6 +23,9 @@ class EmailScheduling(Base):
     attendees_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     suggested_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
+    google_calendar_event_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    google_calendar_html_link: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    google_meet_link: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

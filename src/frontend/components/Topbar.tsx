@@ -49,6 +49,7 @@ export default function Topbar({ user }: TopbarProps) {
   const router = useRouter();
 
   const handleLogout = () => {
+    localStorage.removeItem("access_token");
     window.location.href = "/api/v1/auth/logout";
   };
 

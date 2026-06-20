@@ -10,7 +10,7 @@ import docx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from backend.api.auth_dependencies import get_current_user
+from backend.api.dependencies import require_admin
 from backend.models.user import User
 from backend.services.chroma_service import ChromaService
 
@@ -19,6 +19,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 _ALLOWED_EXTENSIONS = {".pdf", ".docx"}
+
+
+class BroadcastRequest(BaseModel):
+    message: str
+
+
+@router.post(
+    "/broadcast",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Broadcast system-wide WebSocket announcement",
+)
+async def broadcast_announcement(
+    payload: BroadcastRequest,
+    _admin: User = Depends(require_admin),
+) -> None:
+    from backend.core.websocket_manager import manager
+    await manager.broadcast({
+        "type": "ADMIN_ANNOUNCEMENT",
+        "message": payload.message,
+    })
 _CHUNK_SIZE = 500
 _CHUNK_OVERLAP = 50
 
@@ -59,7 +79,7 @@ def _chunk_text(text: str) -> list[str]:
 )
 async def ingest_document(
     file: UploadFile,
-    current_user: User = Depends(get_current_user),
+    _admin: User = Depends(require_admin),
 ) -> IngestResponse:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in _ALLOWED_EXTENSIONS:

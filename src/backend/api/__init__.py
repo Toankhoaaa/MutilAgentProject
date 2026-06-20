@@ -7,6 +7,8 @@ from backend.api.routers.auth import router as auth_router
 from backend.api.routers.chat import router as chat_router
 from backend.api.routers.config import router as config_router
 from backend.api.routers.emails import router as emails_router
+from backend.api.routers.knowledge import router as knowledge_router
+from backend.api.routers.rules import router as rules_router
 from backend.api.routers.scheduler import router as scheduler_router
 from backend.api.routers.stats import router as stats_router
 from backend.api.routers.tasks import router as tasks_router
@@ -21,6 +23,8 @@ __all__ = [
     "chat_router",
     "config_router",
     "emails_router",
+    "knowledge_router",
+    "rules_router",
     "scheduler_router",
     "stats_router",
     "tasks_router",

@@ -18,14 +18,17 @@ from backend.models.agent_run import AgentRun
 from backend.models.audit_log import AuditLog
 from backend.models.configuration import Configuration
 from backend.models.user import User
-from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput
+from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput, SecurityAnalysisOutput
+from backend.models.email_rule import EmailRule
 from backend.services.agents.classifier_agent import EmailClassifierAgent
 from backend.services.agents.privacy_agent import PrivacyAgent
 from backend.services.agents.rag_agent import RagAgent
 from backend.services.agents.response_agent import EmailResponseAgent
 from backend.services.agents.scheduling_agent import EmailSchedulingAgent
+from backend.services.agents.security_agent import EmailSecurityAgent
 from backend.services.calendar_service import CalendarAPIError, GoogleCalendarService
 from backend.services.gmail_service import GmailService
+from backend.services.rule_engine import RuleEngine
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,8 @@ _AGENT_ORCHESTRATOR = "EmailOrchestrator"
 _AGENT_CLASSIFIER = "ClassifierAgent"
 _AGENT_RESPONSE = "ResponseAgent"
 _AGENT_SCHEDULING = "SchedulingAgent"
+_AGENT_RULE_ENGINE = "RuleEngine"
+_AGENT_SECURITY = "SecurityAgent"
 _CONFIG_KEY_AGENT_TONE = "agent_tone"
 _CONFIG_KEY_USER_SIGNATURE = "user_signature"
 _DEFAULT_AGENT_TONE = "professional"
@@ -59,6 +64,7 @@ class EmailOrchestrator:
         scheduling_agent: EmailSchedulingAgent | None = None,
         calendar_service: GoogleCalendarService | None = None,
         task_id: str | None = None,
+        security_agent: EmailSecurityAgent | None = None,
     ) -> None:
         self._db = db
         self._gmail = gmail_service
@@ -71,6 +77,8 @@ class EmailOrchestrator:
         self._scheduling = scheduling_agent
         self._calendar = calendar_service
         self._task_id = task_id
+        self._rule_engine = RuleEngine()
+        self._security = security_agent or EmailSecurityAgent()
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
@@ -124,6 +132,11 @@ class EmailOrchestrator:
             )
             self._db.commit()
 
+            user_rules = self._db.scalars(
+                select(EmailRule)
+                .where(EmailRule.user_id == user_id, EmailRule.is_active.is_(True))
+            ).all()
+
             for raw_email in raw_emails:
                 gmail_message_id = raw_email.get("gmail_message_id", "")
 
@@ -131,10 +144,128 @@ class EmailOrchestrator:
                     self._check_cancelled()
                     raw_email = self._privacy.mask_email_dict(raw_email)
 
+                    security_result: SecurityAnalysisOutput = await self._security.analyze(
+                        email_subject=raw_email.get("subject") or "",
+                        email_body=raw_email.get("body") or raw_email.get("snippet") or "",
+                        sender=raw_email.get("sender"),
+                    )
+                    security_blocked = security_result.risk_level == "high" or not security_result.is_safe
+                    if security_blocked:
+                        await manager.broadcast({
+                            "type": "SECURITY_ALERT",
+                            "risk_level": "high",
+                            "warnings": security_result.warnings,
+                        })
+                        self._audit(
+                            user_id=user_id,
+                            agent_name=_AGENT_SECURITY,
+                            action="security_check",
+                            status="blocked",
+                            details={
+                                "gmail_message_id": gmail_message_id,
+                                "risk_level": security_result.risk_level,
+                                "is_safe": security_result.is_safe,
+                                "warnings": security_result.warnings,
+                            },
+                        )
+                    elif security_result.risk_level == "medium":
+                        self._audit(
+                            user_id=user_id,
+                            agent_name=_AGENT_SECURITY,
+                            action="security_check",
+                            status="warning",
+                            details={
+                                "gmail_message_id": gmail_message_id,
+                                "risk_level": security_result.risk_level,
+                                "warnings": security_result.warnings,
+                            },
+                        )
+
+                    rule_match = self._rule_engine.evaluate(raw_email, list(user_rules))
+                    skip_draft = False
+
+                    if rule_match is not None:
+                        self._audit(
+                            user_id=user_id,
+                            agent_name=_AGENT_RULE_ENGINE,
+                            action="rule_matched",
+                            status="success",
+                            details={
+                                "gmail_message_id": gmail_message_id,
+                                "rule_id": str(rule_match.rule.id),
+                                "rule_name": rule_match.rule.name,
+                                "action": rule_match.action,
+                            },
+                        )
+                        if rule_match.action == "trash":
+                            if self._gmail is not None and gmail_message_id:
+                                await self._gmail.trash_message(gmail_message_id)
+                            self._db.commit()
+                            summary["processed"] += 1
+                            summary["processed_emails"].append({
+                                "gmail_message_id": gmail_message_id,
+                                "subject": raw_email.get("subject"),
+                                "sender": raw_email.get("sender"),
+                                "category": "trashed_by_rule",
+                                "priority_score": None,
+                                "summary": None,
+                                "confidence": None,
+                                "draft_subject": None,
+                                "has_draft": False,
+                            })
+                            continue
+                        elif rule_match.action == "skip_ai":
+                            self._db.commit()
+                            summary["processed"] += 1
+                            summary["processed_emails"].append({
+                                "gmail_message_id": gmail_message_id,
+                                "subject": raw_email.get("subject"),
+                                "sender": raw_email.get("sender"),
+                                "category": "skipped_by_rule",
+                                "priority_score": None,
+                                "summary": None,
+                                "confidence": None,
+                                "draft_subject": None,
+                                "has_draft": False,
+                            })
+                            continue
+                        elif rule_match.action == "alert":
+                            await manager.broadcast({
+                                "type": "NEW_URGENT_EMAIL",
+                                "subject": raw_email.get("subject"),
+                                "summary": rule_match.action_value or "Alert triggered by email rule.",
+                            })
+                        elif rule_match.action == "skip_draft":
+                            skip_draft = True
+
                     self._check_cancelled()
-                    classification_output, classify_ms = await self._classify_email(raw_email)
-                    llm_calls_count += 1
-                    llm_total_time_ms += classify_ms or 0
+                    _forced_by_rule = rule_match is not None and rule_match.action == "force_category"
+                    if security_blocked:
+                        classification_output = EmailClassificationOutput.model_construct(
+                            category=EmailCategory.SPAM,
+                            priority_score=1,
+                            summary="Email flagged as high-risk threat by security agent.",
+                            deadline=None,
+                            confidence=1.0,
+                        )
+                        skip_draft = True
+                    elif _forced_by_rule:
+                        raw_category = rule_match.action_value or "important"
+                        try:
+                            forced_cat = EmailCategory(raw_category)
+                        except ValueError:
+                            forced_cat = EmailCategory.IMPORTANT
+                        classification_output = EmailClassificationOutput.model_construct(
+                            category=forced_cat,
+                            priority_score=3,
+                            summary="Categorized by email rule engine.",
+                            deadline=None,
+                            confidence=1.0,
+                        )
+                    else:
+                        classification_output, classify_ms = await self._classify_email(raw_email)
+                        llm_calls_count += 1
+                        llm_total_time_ms += classify_ms or 0
 
                     self._audit(
                         user_id=user_id,
@@ -146,11 +277,12 @@ class EmailOrchestrator:
                             "category": classification_output.category.value,
                             "priority_score": classification_output.priority_score,
                             "confidence": classification_output.confidence,
+                            **({"source": "rule_engine"} if _forced_by_rule else {}),
                         },
                     )
 
                     self._check_cancelled()
-                    scheduling_result = await self._handle_scheduling(raw_email, user_id)
+                    scheduling_result = await self._handle_scheduling(raw_email, user_id, security_blocked=security_blocked)
                     if scheduling_result:
                         result_status = scheduling_result["status"]
                         if result_status == "scheduled":
@@ -185,10 +317,13 @@ class EmailOrchestrator:
                         "confidence": classification_output.confidence,
                         "draft_subject": None,
                         "has_draft": False,
+                        "is_safe": security_result.is_safe,
+                        "security_risk_level": security_result.risk_level,
+                        "security_warnings": security_result.warnings,
                     }
 
                     self._check_cancelled()
-                    if EmailResponseAgent.is_eligible(classification_output.category):
+                    if not skip_draft and EmailResponseAgent.is_eligible(classification_output.category):
                         rag_context = self._rag.retrieve(
                             raw_email.get("body") or raw_email.get("snippet") or ""
                         )
@@ -305,8 +440,26 @@ class EmailOrchestrator:
         """Classify a single email and optionally draft a reply with no DB writes."""
         self._check_cancelled()
         raw_email = self._privacy.mask_email_dict(raw_email)
+
+        security_result: SecurityAnalysisOutput = await self._security.analyze(
+            email_subject=raw_email.get("subject") or "",
+            email_body=raw_email.get("body") or raw_email.get("snippet") or "",
+            sender=raw_email.get("sender"),
+        )
+        security_blocked = security_result.risk_level == "high" or not security_result.is_safe
+
         self._check_cancelled()
-        classification, _ = await self._classify_email(raw_email)
+        if security_blocked:
+            classification, _ = EmailClassificationOutput.model_construct(
+                category=EmailCategory.SPAM,
+                priority_score=1,
+                summary="Email flagged as high-risk threat by security agent.",
+                deadline=None,
+                confidence=1.0,
+            ), None
+        else:
+            classification, _ = await self._classify_email(raw_email)
+
         result: dict[str, Any] = {
             "category": classification.category.value,
             "priority_score": classification.priority_score,
@@ -314,6 +467,9 @@ class EmailOrchestrator:
             "confidence": classification.confidence,
             "draft_content": None,
             "draft_subject": None,
+            "is_safe": security_result.is_safe,
+            "security_risk_level": security_result.risk_level,
+            "security_warnings": security_result.warnings,
         }
 
         self._check_cancelled()
@@ -341,6 +497,7 @@ class EmailOrchestrator:
         self,
         raw_email: dict[str, Any],
         user_id: uuid.UUID,
+        security_blocked: bool = False,
     ) -> dict[str, Any] | None:
         """
         Run the scheduling sub-pipeline for one email.
@@ -349,6 +506,8 @@ class EmailOrchestrator:
         "alternatives" (conflict), or None when not a meeting request.
         """
         if self._scheduling is None or self._calendar is None:
+            return None
+        if security_blocked:
             return None
 
         subject = raw_email.get("subject") or ""

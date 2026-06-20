@@ -10,10 +10,79 @@ interface AnalyzeEmailMessage {
   token: string;
 }
 
-type IncomingMessage = AnalyzeEmailMessage;
+interface SaveAttachmentMessage {
+  type: 'SAVE_ATTACHMENT';
+  downloadUrl: string;
+  filename: string;
+  sourceEmail: string;
+  notes: string;
+  token: string;
+}
+
+interface KeepaliveMessage {
+  type: 'KEEPALIVE';
+}
+
+type IncomingMessage = AnalyzeEmailMessage | SaveAttachmentMessage | KeepaliveMessage;
+
+// ── WebSocket persistent connection ──────────────────────────────────────────
+
+let ws: WebSocket | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function connectWS(): void {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  ws = new WebSocket('ws://localhost:8000/ws/notifications');
+
+  ws.onopen = () => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  ws.onmessage = (event: MessageEvent<string>) => {
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(event.data) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    void chrome.tabs.query({ url: 'https://mail.google.com/*' }).then((tabs) => {
+      for (const tab of tabs) {
+        if (tab.id !== undefined) {
+          chrome.tabs.sendMessage(tab.id, { type: 'WS_EVENT', data }).catch(() => {});
+        }
+      }
+    });
+  };
+
+  const scheduleReconnect = () => {
+    ws = null;
+    if (reconnectTimer === null) {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWS();
+      }, 3000);
+    }
+  };
+
+  ws.onclose = () => scheduleReconnect();
+  ws.onerror = () => scheduleReconnect();
+}
+
+connectWS();
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener(
   (message: IncomingMessage, _sender, sendResponse) => {
+    if (message.type === 'KEEPALIVE') {
+      connectWS();
+      sendResponse({ ok: true });
+      return true;
+    }
+
     if (message.type === 'ANALYZE_EMAIL') {
       const { subject, body, sender, token } = message;
       fetch(`${API_BASE}/emails/analyze`, {
@@ -33,7 +102,39 @@ chrome.runtime.onMessage.addListener(
           return res.json().then((data) => sendResponse({ ok: true, data }));
         })
         .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
-      return true; // keep channel open for async sendResponse
+      return true;
+    }
+
+    if (message.type === 'SAVE_ATTACHMENT') {
+      const { downloadUrl, filename, sourceEmail, notes, token } = message;
+      // Fetch attachment bytes then POST as multipart to the knowledge upload endpoint.
+      // Running in the service worker bypasses the HTTPS→HTTP mixed-content restriction.
+      fetch(downloadUrl)
+        .then((res) => {
+          if (!res.ok) throw new Error(`Attachment fetch failed: HTTP ${res.status}`);
+          return res.blob();
+        })
+        .then((blob) => {
+          const form = new FormData();
+          form.append('file', blob, filename);
+          if (sourceEmail) form.append('source_email', sourceEmail);
+          if (notes) form.append('notes', notes);
+          return fetch(`${API_BASE}/knowledge/upload`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            body: form,
+          });
+        })
+        .then((res) => {
+          if (!res.ok) {
+            return res.text().then((text) => {
+              sendResponse({ ok: false, error: `HTTP ${res.status}: ${text}` });
+            });
+          }
+          return res.json().then((data) => sendResponse({ ok: true, data }));
+        })
+        .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
+      return true;
     }
   },
 );

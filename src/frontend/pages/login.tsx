@@ -7,10 +7,10 @@ export default function LoginPage() {
   const router = useRouter();
   const { error } = router.query;
 
-  // If already authenticated, redirect to dashboard
+  // If already authenticated, redirect based on role
   useEffect(() => {
     api.get("/auth/me")
-      .then(() => router.replace("/dashboard"))
+      .then((res) => router.replace(res.data.is_admin ? "/admin" : "/emails"))
       .catch(() => { /* not logged in, stay on login page */ });
   }, [router]);
 

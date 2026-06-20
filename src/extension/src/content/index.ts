@@ -14,6 +14,12 @@ const TONE_ICON =
 const AI_ANALYSIS_ICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230f9d58'%3E%3Cpath d='M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z'/%3E%3C/svg%3E";
 
+const SNOOZE_ICON =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%235f6368'%3E%3Cpath d='M7.88 3.39L6.6 1.86 2 5.71l1.29 1.53 4.59-3.85zM22 5.72l-4.6-3.86-1.29 1.53 4.6 3.86L22 5.72zM12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 16c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7zm-1.5-11.5v5.25l4.5 2.67-.75 1.23L9 15V8.5h1.5z'/%3E%3C/svg%3E";
+
+const KB_SAVE_ICON =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236366f1'%3E%3Cpath d='M4 7c0-1.657 3.582-3 8-3s8 1.343 8 3M4 7v5c0 1.657 3.582 3 8 3s8-1.343 8-3V7M4 12v5c0 1.657 3.582 3 8 3s8-1.343 8-3v-5'/%3E%3C/svg%3E";
+
 const TONES = ['Formal', 'Polite', 'Professional', 'Friendly', 'Casual'] as const;
 type Tone = typeof TONES[number];
 
@@ -43,6 +49,143 @@ function safeSetBodyHTML(view: InboxSDK.ComposeView, html: string): void {
   }
 }
 
+// ── Toast Notification System ─────────────────────────────────────────────
+
+interface ToastOptions {
+  title: string;
+  body: string;
+  color?: string;
+  bgColor?: string;
+  pulse?: boolean;
+  duration?: number;
+  action?: { label: string; onClick: () => void };
+}
+
+const toastContainer = document.createElement('div');
+toastContainer.style.cssText = [
+  'position:fixed',
+  'bottom:20px',
+  'right:20px',
+  'z-index:2147483647',
+  'pointer-events:none',
+  'display:flex',
+  'flex-direction:column-reverse',
+  'gap:8px',
+  'align-items:flex-end',
+].join(';');
+document.body.appendChild(toastContainer);
+
+function showToast(opts: ToastOptions): void {
+  const { title, body, color = '#fff', bgColor = '#333', pulse = false, duration = 5000, action } = opts;
+
+  const toast = document.createElement('div');
+
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes slideIn { from { transform: translateX(110%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @keyframes pulse { 0%,100% { box-shadow: 0 4px 16px rgba(0,0,0,.3); } 50% { box-shadow: 0 0 0 6px ${bgColor}55, 0 4px 20px rgba(0,0,0,.4); } }
+  `;
+  toast.appendChild(style);
+
+  toast.style.cssText = [
+    `background:${bgColor}`,
+    `color:${color}`,
+    'border-radius:10px',
+    'padding:12px 16px',
+    'min-width:280px',
+    'max-width:360px',
+    'box-shadow:0 4px 16px rgba(0,0,0,.3)',
+    'pointer-events:all',
+    'font-family:Google Sans,Roboto,sans-serif',
+    `animation:slideIn .3s ease${pulse ? ',pulse 1.5s ease-in-out .3s infinite' : ''}`,
+  ].join(';');
+
+  const titleEl = document.createElement('div');
+  titleEl.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:4px';
+  titleEl.textContent = title;
+
+  const bodyEl = document.createElement('div');
+  bodyEl.style.cssText = 'font-size:12px;opacity:.9;line-height:1.4';
+  bodyEl.textContent = body;
+
+  toast.appendChild(titleEl);
+  toast.appendChild(bodyEl);
+
+  if (action) {
+    const btn = document.createElement('button');
+    btn.textContent = action.label;
+    btn.style.cssText = [
+      'display:block',
+      'margin-top:8px',
+      'padding:4px 12px',
+      'border:1.5px solid rgba(255,255,255,.7)',
+      'border-radius:6px',
+      'background:transparent',
+      `color:${color}`,
+      'font-size:12px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'cursor:pointer',
+      'font-weight:600',
+    ].join(';');
+    btn.addEventListener('click', action.onClick);
+    toast.appendChild(btn);
+  }
+
+  toastContainer.appendChild(toast);
+  setTimeout(() => toast.remove(), duration);
+}
+
+function handleWsEvent(data: Record<string, unknown>): void {
+  const type = typeof data.type === 'string' ? data.type : '';
+  const title = typeof data.title === 'string' ? data.title : '';
+  const body = typeof data.body === 'string' ? data.body : '';
+  const schedulingId = typeof data.scheduling_id === 'string' ? data.scheduling_id : undefined;
+
+  if (type === 'NEW_URGENT_EMAIL') {
+    showToast({ title: title || 'New Urgent Email', body, color: '#fff', bgColor: '#e37400' });
+  } else if (type === 'SECURITY_ALERT') {
+    showToast({ title: title || 'Security Alert', body, color: '#fff', bgColor: '#d93025', pulse: true, duration: 12000 });
+  } else if (type === 'NEW_CALENDAR_EVENT') {
+    showToast({
+      title: title || 'New Calendar Event',
+      body,
+      color: '#fff',
+      bgColor: '#0f9d58',
+      duration: 15000,
+      action: schedulingId ? {
+        label: 'Confirm on Calendar',
+        onClick: () => {
+          void chrome.storage.local.get('ai_reply_token').then((stored) => {
+            const token = stored['ai_reply_token'] as string | undefined;
+            if (!token) return;
+            fetch(`${API_BASE}/emails/scheduled-events/${schedulingId}/confirm`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` },
+            }).catch(() => {});
+          });
+        },
+      } : undefined,
+    });
+  } else if (type === 'SNOOZED_EMAIL_DUE') {
+    const subj = typeof data.subject === 'string' ? data.subject : 'Email';
+    const threadId = typeof data.thread_id === 'string' ? data.thread_id : undefined;
+    showToast({
+      title: '⏰ Snooze Reminder',
+      body: subj || 'A snoozed email is ready for your attention.',
+      color: '#fff',
+      bgColor: '#1a73e8',
+      pulse: true,
+      duration: 15000,
+      action: threadId ? {
+        label: 'Open Thread',
+        onClick: () => {
+          window.open(`https://mail.google.com/mail/u/0/#inbox/${threadId}`, '_blank');
+        },
+      } : undefined,
+    });
+  }
+}
+
 // ── Snippet Engine ────────────────────────────────────────────────────────
 
 let snippetCache: Snippet[] | null = null;
@@ -52,7 +195,11 @@ interface ComposeViewRef { getBodyElement(): Element | null; }
 let lastComposeView: ComposeViewRef | null = null;
 let lastRange: Range | null = null;
 
-chrome.runtime.onMessage.addListener((msg: { type: string; content: string; language: string }) => {
+chrome.runtime.onMessage.addListener((msg: { type: string; content?: string; language?: string; data?: Record<string, unknown> }) => {
+  if (msg.type === 'WS_EVENT' && msg.data) {
+    handleWsEvent(msg.data);
+    return;
+  }
   if (msg.type !== 'INSERT_TEMPLATE' || !lastComposeView) return;
   const body = lastComposeView.getBodyElement();
   if (!body) return;
@@ -65,6 +212,10 @@ chrome.runtime.onMessage.addListener((msg: { type: string; content: string; lang
   const cmd = msg.language === 'template' ? 'insertHTML' : 'insertText';
   document.execCommand(cmd, false, msg.content);
 });
+
+setInterval(() => {
+  chrome.runtime.sendMessage({ type: 'KEEPALIVE' }).catch(() => {});
+}, 20000);
 
 function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
   let timer: ReturnType<typeof setTimeout>;
@@ -86,6 +237,72 @@ const invalidateSnippetCache = debounce(() => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'sync' && 'snippets' in changes) invalidateSnippetCache();
 });
+
+// ── Inbox Priority Badges ─────────────────────────────────────────────────────
+
+const BADGE_CONFIG: Record<string, { bg: string; fg: string; label: string }> = {
+  urgent:     { bg: '#d93025', fg: '#fff', label: '🔴 Urgent' },
+  important:  { bg: '#e37400', fg: '#fff', label: '🟠 Important' },
+  need_reply: { bg: '#1a73e8', fg: '#fff', label: '💬 Reply' },
+  newsletter: { bg: '#6366f1', fg: '#fff', label: '📰 Newsletter' },
+  spam:       { bg: '#80868b', fg: '#fff', label: '🚫 Spam' },
+};
+
+const badgeCache = new Map<string, { category: string; priority_score: number }>();
+const pendingRows = new Map<string, InboxSDK.ThreadRowView>();
+let batchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function applyBadge(row: InboxSDK.ThreadRowView, category: string): void {
+  const cfg = BADGE_CONFIG[category];
+  if (!cfg) return;
+  row.addLabel({
+    title: cfg.label,
+    foregroundColor: cfg.fg,
+    backgroundColor: cfg.bg,
+    maxWidth: '90px',
+  });
+}
+
+async function flushBatch(token: string): Promise<void> {
+  const snapshot = new Map(pendingRows);
+  pendingRows.clear();
+  batchTimer = null;
+
+  if (snapshot.size === 0) return;
+
+  const items = Array.from(snapshot.entries()).map(([thread_id, row]) => ({
+    thread_id,
+    subject: row.getSubject(),
+    snippet: '',
+    sender: row.getContacts()[0]?.emailAddress ?? null,
+  }));
+
+  try {
+    const response = await fetch(`${API_BASE}/emails/classify-quick`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(items),
+    });
+
+    if (!response.ok) return;
+
+    const results: Array<{ thread_id: string; category: string; priority_score: number; confidence: number }> =
+      await response.json() as Array<{ thread_id: string; category: string; priority_score: number; confidence: number }>;
+
+    for (const result of results) {
+      badgeCache.set(result.thread_id, { category: result.category, priority_score: result.priority_score });
+      const row = snapshot.get(result.thread_id);
+      if (row) applyBadge(row, result.category);
+    }
+  } catch {
+    // Silently ignore network errors so the inbox remains functional
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function attachSnippetEngine(composeView: InboxSDK.ComposeView): void {
   const body = composeView.getBodyElement();
@@ -322,10 +539,247 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
   // Track open thread views by thread ID so the compose handler can read them
   const threadViews = new Map<string, InboxSDK.ThreadView>();
 
+  // ── Knowledge Base: floating save modal ─────────────────────────────────────
+  const kbModal = document.createElement('div');
+  kbModal.style.cssText = [
+    'display:none',
+    'position:fixed',
+    'inset:0',
+    'z-index:2147483647',
+    'background:rgba(0,0,0,.45)',
+    'align-items:center',
+    'justify-content:center',
+  ].join(';');
+
+  const kbModalBox = document.createElement('div');
+  kbModalBox.style.cssText = [
+    'background:#fff',
+    'border-radius:12px',
+    'box-shadow:0 8px 32px rgba(0,0,0,.22)',
+    'padding:20px 22px 18px',
+    'width:400px',
+    'font-family:Google Sans,Roboto,sans-serif',
+  ].join(';');
+  kbModal.appendChild(kbModalBox);
+  document.body.appendChild(kbModal);
+
+  let kbSaveHandler: (() => void) | null = null;
+
+  function openKBModal(
+    getDownloadURL: () => Promise<string | null | undefined>,
+    filename: string,
+    sourceEmail: string,
+  ): void {
+    kbModalBox.innerHTML = '';
+
+    // Title
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:14px;font-weight:600;color:#202124;margin-bottom:14px';
+    title.textContent = `Save "${filename}" to Knowledge Base`;
+    kbModalBox.appendChild(title);
+
+    // Notes label + textarea
+    const notesLabel = document.createElement('div');
+    notesLabel.style.cssText = 'font-size:12px;color:#5f6368;margin-bottom:5px';
+    notesLabel.textContent = 'Notes (optional)';
+    kbModalBox.appendChild(notesLabel);
+
+    const notesArea = document.createElement('textarea');
+    notesArea.rows = 3;
+    notesArea.placeholder = 'Add context about this document…';
+    notesArea.style.cssText = [
+      'width:100%',
+      'box-sizing:border-box',
+      'border:1px solid #dadce0',
+      'border-radius:6px',
+      'padding:8px 10px',
+      'font-size:13px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'resize:none',
+      'outline:none',
+      'color:#202124',
+    ].join(';');
+    kbModalBox.appendChild(notesArea);
+
+    // Status line
+    const statusLine = document.createElement('div');
+    statusLine.style.cssText = 'font-size:12px;min-height:18px;margin:8px 0 12px';
+    kbModalBox.appendChild(statusLine);
+
+    // Buttons
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.style.cssText = [
+      'padding:7px 16px',
+      'border:1px solid #dadce0',
+      'border-radius:6px',
+      'background:#fff',
+      'color:#3c4043',
+      'font-size:13px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'cursor:pointer',
+    ].join(';');
+    cancelBtn.addEventListener('click', () => { kbModal.style.display = 'none'; });
+
+    const saveBtn = document.createElement('button');
+    saveBtn.textContent = 'Save to KB';
+    saveBtn.style.cssText = [
+      'padding:7px 16px',
+      'border:none',
+      'border-radius:6px',
+      'background:#6366f1',
+      'color:#fff',
+      'font-size:13px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'cursor:pointer',
+      'font-weight:600',
+    ].join(';');
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(saveBtn);
+    kbModalBox.appendChild(btnRow);
+
+    kbSaveHandler = () => {
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
+      statusLine.style.color = '#5f6368';
+      statusLine.textContent = '⏳ Downloading attachment…';
+
+      void (async () => {
+        try {
+          const stored = await chrome.storage.local.get('ai_reply_token');
+          const token = stored['ai_reply_token'] as string | undefined;
+          if (!token) {
+            statusLine.style.color = '#d93025';
+            statusLine.textContent = '❌ No API token saved. Open the extension popup first.';
+            saveBtn.disabled = false;
+            cancelBtn.disabled = false;
+            return;
+          }
+
+          const url = await getDownloadURL();
+          if (!url) {
+            statusLine.style.color = '#d93025';
+            statusLine.textContent = '❌ Could not get download URL for this attachment.';
+            saveBtn.disabled = false;
+            cancelBtn.disabled = false;
+            return;
+          }
+
+          const response = await new Promise<{ ok: boolean; error?: string }>(
+            (resolve) => chrome.runtime.sendMessage(
+              {
+                type: 'SAVE_ATTACHMENT',
+                downloadUrl: url,
+                filename,
+                sourceEmail,
+                notes: notesArea.value.trim(),
+                token,
+              },
+              resolve,
+            ),
+          );
+
+          if (!response.ok) {
+            statusLine.style.color = '#d93025';
+            statusLine.textContent = `❌ ${response.error ?? 'Upload failed.'}`;
+            saveBtn.disabled = false;
+            cancelBtn.disabled = false;
+            return;
+          }
+
+          statusLine.style.color = '#0f9d58';
+          statusLine.textContent = '✓ Saved! AI summary is generating in the background.';
+          cancelBtn.textContent = 'Close';
+          cancelBtn.disabled = false;
+          saveBtn.style.display = 'none';
+        } catch (err) {
+          statusLine.style.color = '#d93025';
+          statusLine.textContent = `❌ ${(err as Error).message}`;
+          saveBtn.disabled = false;
+          cancelBtn.disabled = false;
+        }
+      })();
+    };
+
+    saveBtn.addEventListener('click', () => kbSaveHandler?.());
+    kbModal.style.display = 'flex';
+    notesArea.focus();
+  }
+
+  kbModal.addEventListener('mousedown', (e) => {
+    if (e.target === kbModal) kbModal.style.display = 'none';
+  });
+
+  // ── Attachment button injection ───────────────────────────────────────────
+  // WeakSet prevents adding duplicate buttons if messageViewsChanged fires again
+  const processedAttachmentCards = new WeakSet<Element>();
+
+  function injectKBButtons(mv: InboxSDK.MessageView, subject: string): void {
+    if (!mv.isLoaded()) return;
+    const sender = mv.getSender()?.emailAddress ?? '';
+    const sourceEmail = [sender, subject].filter(Boolean).join(' — ');
+
+    for (const card of mv.getFileAttachmentCardViews()) {
+      if (card.getAttachmentType() !== 'FILE') continue;
+      const filename = card.getTitle();
+      if (!/\.(pdf|docx)$/i.test(filename)) continue;
+      const el = card.getElement();
+      if (processedAttachmentCards.has(el)) continue;
+      processedAttachmentCards.add(el);
+
+      card.addButton({
+        iconUrl: KB_SAVE_ICON,
+        tooltip: 'Save to AI Knowledge Base',
+        onClick: (event) => {
+          const getUrl = event?.getDownloadURL ?? (() => card.getDownloadURL());
+          openKBModal(getUrl, filename, sourceEmail);
+        },
+      });
+    }
+  }
+
   sdk.Conversations.registerThreadViewHandler(async (threadView) => {
     const id = await threadView.getThreadIDAsync();
     threadViews.set(id, threadView);
     threadView.on('destroy', () => threadViews.delete(id));
+  });
+
+  sdk.Lists.registerThreadRowViewHandler((row) => {
+    const threadId = row.getThreadIDIfStable();
+    if (!threadId) return;
+
+    const cached = badgeCache.get(threadId);
+    if (cached) {
+      applyBadge(row, cached.category);
+      return;
+    }
+
+    pendingRows.set(threadId, row);
+
+    if (!batchTimer) {
+      batchTimer = setTimeout(() => {
+        void chrome.storage.local.get('ai_reply_token').then((stored) => {
+          const token = stored['ai_reply_token'] as string | undefined;
+          if (token) {
+            void flushBatch(token);
+          } else {
+            pendingRows.clear();
+            batchTimer = null;
+          }
+        });
+      }, 400);
+    }
+  });
+
+  // registerMessageViewHandler fires once per message as it loads — reliable
+  // for both initial messages and new ones added to a thread later.
+  sdk.Conversations.registerMessageViewHandler((mv) => {
+    const subject = mv.getThreadView().getSubject();
+    injectKBButtons(mv, subject);
   });
 
   // ── AI Analysis button (thread toolbar — visible, not hidden in overflow) ──
@@ -338,6 +792,9 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     detected_language: string;
     has_event: boolean;
     event_details: { event_title: string | null; start_time: string | null; end_time: string | null; attendees: string[] } | null;
+    is_safe: boolean;
+    risk_level: 'low' | 'medium' | 'high';
+    warnings: string[];
   }
 
   function sentimentColor(s: string): string {
@@ -413,7 +870,46 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     panelContent.innerHTML = `<div style="color:#d93025;font-size:13px;padding:8px 0">❌ ${escapeHtml(msg)}</div>`;
   }
 
-  function renderResult(data: AnalyzeResponse): void {
+  let currentNoticeBar: InboxSDK.SimpleElementView | null = null;
+
+  function injectSecurityBanner(threadView: InboxSDK.ThreadView, riskLevel: string, warnings: string[]): void {
+    if (currentNoticeBar && !currentNoticeBar.destroyed) currentNoticeBar.destroy();
+    currentNoticeBar = null;
+    if (riskLevel === 'low') return;
+
+    const isHigh = riskLevel === 'high';
+    const colors = isHigh
+      ? { bg: '#fce8e6', border: '#d93025', text: '#c5221f' }
+      : { bg: '#fef7e0', border: '#f9ab00', text: '#b06000' };
+
+    const noticeBar = threadView.addNoticeBar();
+    currentNoticeBar = noticeBar;
+    noticeBar.el.style.cssText = [
+      `background:${colors.bg}`,
+      `border-left:4px solid ${colors.border}`,
+      'padding:10px 14px',
+      'margin:8px 0',
+      'border-radius:4px',
+      'font-family:Google Sans,Roboto,sans-serif',
+      'position:relative',
+    ].join(';');
+
+    const warningItems = warnings
+      .map((w) => `<li style="margin-bottom:3px">${escapeHtml(w)}</li>`)
+      .join('');
+
+    noticeBar.el.innerHTML = `
+      <div style="font-size:13px;font-weight:600;color:${colors.text};margin-bottom:6px">
+        ${isHigh ? '🚨 Cảnh báo bảo mật cao' : '⚠️ Cảnh báo bảo mật'}
+      </div>
+      <ul style="margin:0;padding-left:18px;font-size:12px;color:${colors.text}">${warningItems}</ul>
+      <button style="position:absolute;top:8px;right:10px;background:none;border:none;font-size:16px;color:${colors.text};cursor:pointer;line-height:1">&times;</button>
+    `;
+
+    noticeBar.el.querySelector('button')?.addEventListener('click', () => noticeBar.destroy());
+  }
+
+  function renderResult(data: AnalyzeResponse, threadView: InboxSDK.ThreadView): void {
     const summaryHtml = data.summary
       .map((b) => `<li style="margin-bottom:4px">${escapeHtml(b)}</li>`)
       .join('');
@@ -456,6 +952,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
       ${translationHtml}
       ${eventHtml}
     `;
+    injectSecurityBanner(threadView, data.risk_level, data.warnings);
   }
 
   sdk.Toolbars.registerThreadButton({
@@ -501,8 +998,161 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
           renderError('Analysis failed — check the console for details.');
           return;
         }
-        renderResult(response.data!);
+        renderResult(response.data!, threadView);
       })();
+    },
+  });
+
+  // ── Snooze Toolbar ────────────────────────────────────────────────────────
+
+  interface SnoozeOption { label: string; offsetMs: number }
+
+  const SNOOZE_OPTIONS: SnoozeOption[] = [
+    { label: 'In 1 hour',       offsetMs: 60 * 60 * 1000 },
+    { label: 'In 3 hours',      offsetMs: 3 * 60 * 60 * 1000 },
+    { label: 'Tomorrow 9 AM',   offsetMs: -1 }, // special-cased below
+    { label: 'In 2 days',       offsetMs: 2 * 24 * 60 * 60 * 1000 },
+    { label: 'Next week',       offsetMs: 7 * 24 * 60 * 60 * 1000 },
+  ];
+
+  function resolveSnoozeUntil(opt: SnoozeOption): Date {
+    if (opt.offsetMs !== -1) return new Date(Date.now() + opt.offsetMs);
+    // "Tomorrow 9 AM" in local time
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    return d;
+  }
+
+  const snoozePanel = document.createElement('div');
+  snoozePanel.setAttribute('data-ai-snooze-panel', '');
+  snoozePanel.style.cssText = [
+    'display:none',
+    'position:fixed',
+    'z-index:2147483647',
+    'background:#fff',
+    'border:1px solid #dadce0',
+    'border-radius:10px',
+    'box-shadow:0 4px 16px rgba(0,0,0,.18)',
+    'padding:10px 0',
+    'font-family:Google Sans,Roboto,sans-serif',
+    'min-width:200px',
+  ].join(';');
+
+  const snoozePanelTitle = document.createElement('div');
+  snoozePanelTitle.style.cssText = 'padding:6px 16px 10px;font-size:11px;font-weight:600;color:#5f6368;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #f1f3f4;margin-bottom:4px';
+  snoozePanelTitle.textContent = 'Snooze until';
+  snoozePanel.appendChild(snoozePanelTitle);
+
+  // Status line (shown briefly after API call)
+  const snoozeStatus = document.createElement('div');
+  snoozeStatus.style.cssText = 'padding:4px 16px;font-size:12px;min-height:18px';
+  snoozePanel.appendChild(snoozeStatus);
+
+  SNOOZE_OPTIONS.forEach((opt) => {
+    const item = document.createElement('div');
+    item.style.cssText = [
+      'padding:8px 16px',
+      'font-size:13px',
+      'color:#3c4043',
+      'cursor:pointer',
+    ].join(';');
+    item.textContent = opt.label;
+    item.addEventListener('mouseenter', () => { item.style.background = '#f1f3f4'; });
+    item.addEventListener('mouseleave', () => { item.style.background = ''; });
+
+    item.addEventListener('click', () => {
+      const snoozeUntil = resolveSnoozeUntil(opt);
+      snoozeStatus.style.color = '#5f6368';
+      snoozeStatus.textContent = '⏳ Snoozing…';
+
+      void chrome.storage.local.get('ai_reply_token').then(async (stored) => {
+        const token = stored['ai_reply_token'] as string | undefined;
+        if (!token) {
+          snoozeStatus.style.color = '#d93025';
+          snoozeStatus.textContent = '❌ No API token saved.';
+          return;
+        }
+        // activeSnoozeThread is captured from the button onClick closure below
+        const tv = activeSnoozeThread;
+        if (!tv) {
+          snoozePanel.style.display = 'none';
+          return;
+        }
+        const msgs = tv.getMessageViews();
+        const latest = msgs[msgs.length - 1];
+        const gmailMsgId = (latest as { getMessageIDAsync?: () => Promise<string> }).getMessageIDAsync
+          ? await (latest as { getMessageIDAsync: () => Promise<string> }).getMessageIDAsync()
+          : '';
+        const threadId = await tv.getThreadIDAsync();
+        const subject = tv.getSubject();
+        const sender = latest?.getSender()?.emailAddress ?? '';
+
+        try {
+          const res = await fetch(`${API_BASE}/emails/snooze`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              gmail_message_id: gmailMsgId || threadId,
+              thread_id: threadId,
+              subject,
+              sender,
+              snooze_until: snoozeUntil.toISOString(),
+            }),
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            snoozeStatus.style.color = '#d93025';
+            snoozeStatus.textContent = `❌ Error: ${text.slice(0, 80)}`;
+            return;
+          }
+          snoozeStatus.style.color = '#0f9d58';
+          snoozeStatus.textContent = `✓ Snoozed until ${opt.label.toLowerCase()}`;
+          setTimeout(() => { snoozePanel.style.display = 'none'; snoozeStatus.textContent = ''; }, 1800);
+        } catch (err) {
+          snoozeStatus.style.color = '#d93025';
+          snoozeStatus.textContent = `❌ ${(err as Error).message}`;
+        }
+      });
+    });
+
+    snoozePanel.appendChild(item);
+  });
+
+  document.body.appendChild(snoozePanel);
+
+  let activeSnoozeThread: InboxSDK.ThreadView | null = null;
+
+  const onSnoozePanelOutside = (e: MouseEvent) => {
+    if (snoozePanel.style.display !== 'none' && !snoozePanel.contains(e.target as Node)) {
+      snoozePanel.style.display = 'none';
+      snoozeStatus.textContent = '';
+    }
+  };
+  document.addEventListener('mousedown', onSnoozePanelOutside);
+
+  sdk.Toolbars.registerThreadButton({
+    title: 'Snooze',
+    iconUrl: SNOOZE_ICON,
+    positions: ['THREAD'],
+    onClick(event) {
+      const threadView = event.selectedThreadViews[0];
+      if (!threadView) return;
+      activeSnoozeThread = threadView;
+
+      if (snoozePanel.style.display !== 'none') {
+        snoozePanel.style.display = 'none';
+        return;
+      }
+
+      // Position panel near the toolbar (top-right area)
+      snoozePanel.style.right = '24px';
+      snoozePanel.style.top = '80px';
+      snoozeStatus.textContent = '';
+      snoozePanel.style.display = 'block';
     },
   });
 

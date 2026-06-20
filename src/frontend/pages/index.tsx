@@ -301,7 +301,7 @@ function Navbar() {
 
         {/* Auth state */}
         {user ? (
-          <Link href="/dashboard" className="flex items-center gap-2.5 group">
+          <Link href={user.is_admin ? "/admin" : "/emails"} className="flex items-center gap-2.5 group">
             <div
               className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0 ring-2 ring-transparent group-hover:ring-indigo-200 transition-all"
               style={{ background: "#6366f1" }}

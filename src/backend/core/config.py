@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_REDIRECT_URI: str = ""
     FRONTEND_URL: str = "http://localhost:3000"
     CHROMA_PERSIST_PATH: str = "./chroma_db"
+    ADMIN_REGISTRATION_SECRET: str = "change-me-admin-secret"
 
     model_config = SettingsConfigDict(
         env_file=[".env", "../.env"],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -72,6 +72,22 @@ def get_agent_status(db: Session = Depends(get_db)) -> AgentStatusResponse:
         latest_run=run_response,
         message=message,
     )
+
+
+@router.get(
+    "/runs",
+    response_model=list[AgentRunResponse],
+    summary="Recent agent batch runs",
+    description="Returns the N most recent agent_runs rows ordered by start time descending.",
+)
+def get_recent_runs(
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[AgentRunResponse]:
+    runs = db.scalars(
+        select(AgentRun).order_by(AgentRun.started_at.desc().nulls_last()).limit(limit)
+    ).all()
+    return [AgentRunResponse.model_validate(r) for r in runs]
 
 
 @router.post(

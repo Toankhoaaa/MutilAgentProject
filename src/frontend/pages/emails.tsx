@@ -5,10 +5,16 @@ import useSWR from "swr";
 import axios from "axios";
 import Layout from "@/components/Layout";
 import NotificationToast from "@/components/NotificationToast";
+import EmailTable from "@/components/EmailTable";
+import EmailDetailSheet from "@/components/EmailDetailSheet";
 import api from "@/lib/axios";
-import type { UserProfile, ProcessEmailsResult, GmailEmailItem, ProcessedEmailDetail } from "@/lib/types";
-
-const fetcher = (url: string) => api.get(url).then((r) => r.data);
+import type {
+  UserProfile,
+  ProcessEmailsResult,
+  GmailEmailItem,
+  InboxEmailState,
+  AnalyzeEmailResponse,
+} from "@/lib/types";
 
 const CATEGORY_STYLES: Record<string, string> = {
   urgent: "bg-red-100 text-red-700",
@@ -18,14 +24,7 @@ const CATEGORY_STYLES: Record<string, string> = {
   spam: "bg-zinc-200 text-zinc-500",
 };
 
-function CategoryBadge({ category }: { category: string }) {
-  const cls = CATEGORY_STYLES[category.toLowerCase()] ?? "bg-zinc-100 text-zinc-600";
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
-      {category}
-    </span>
-  );
-}
+const fetcher = (url: string) => api.get(url).then((r) => r.data);
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return "—";
@@ -41,8 +40,11 @@ function formatDate(dateStr: string | null): string {
 export default function EmailsPage() {
   const router = useRouter();
 
+  // Analysis cache — survives re-opens without re-fetching
+  const analysisCacheRef = useRef<Map<string, AnalyzeEmailResponse>>(new Map());
+
   // Inbox state
-  const [inboxEmails, setInboxEmails] = useState<GmailEmailItem[] | null>(null);
+  const [inboxEmails, setInboxEmails] = useState<InboxEmailState[] | null>(null);
   const [loadingInbox, setLoadingInbox] = useState(false);
   const [inboxError, setInboxError] = useState<string | null>(null);
 
@@ -52,6 +54,9 @@ export default function EmailsPage() {
   const [abortedToast, setAbortedToast] = useState(false);
   const processingControllerRef = useRef<AbortController | null>(null);
   const processingTaskIdRef = useRef<string | null>(null);
+
+  // Detail sheet state
+  const [selectedEmail, setSelectedEmail] = useState<InboxEmailState | null>(null);
 
   // Spam cleanup state
   const [cleanupLoading, setCleanupLoading] = useState(false);
@@ -64,12 +69,58 @@ export default function EmailsPage() {
 
   if (authError) return null;
 
+  const isAdmin = user?.is_admin === true;
+
+  const INBOX_FILTER = new Set(["important", "need_reply"]);
+  const displayedEmails = inboxEmails
+    ? inboxEmails.filter((e) => e.category === null || INBOX_FILTER.has(e.category.toLowerCase()))
+    : null;
+
   const handleLoadInbox = async () => {
     setLoadingInbox(true);
     setInboxError(null);
     try {
       const res = await api.get<GmailEmailItem[]>("/emails/list?limit=20");
-      setInboxEmails(res.data);
+      const items: InboxEmailState[] = res.data.map((e) => ({
+        ...e,
+        analysis: analysisCacheRef.current.get(e.gmail_message_id) ?? null,
+        isAnalyzing: false,
+        category: null,
+        priority_score: null,
+      }));
+      setInboxEmails(items);
+
+      // Background classify-quick — inbox stays functional if this fails
+      const classifyPayload = items
+        .filter((e) => e.thread_id)
+        .map((e) => ({
+          thread_id: e.thread_id!,
+          subject: e.subject ?? "",
+          snippet: e.snippet ?? "",
+          sender: e.sender,
+        }));
+
+      if (classifyPayload.length > 0) {
+        api
+          .post<Array<{ thread_id: string; category: string; priority_score: number; confidence: number }>>(
+            "/emails/classify-quick",
+            classifyPayload,
+          )
+          .then((r) => {
+            const resultMap = new Map(r.data.map((x) => [x.thread_id, x]));
+            setInboxEmails((prev) =>
+              prev
+                ? prev.map((email) => {
+                    const hit = email.thread_id ? resultMap.get(email.thread_id) : undefined;
+                    return hit
+                      ? { ...email, category: hit.category, priority_score: hit.priority_score }
+                      : email;
+                  })
+                : null,
+            );
+          })
+          .catch(() => {}); // graceful degradation — badges simply don't appear
+      }
     } catch {
       setInboxError("Không thể tải inbox. Kiểm tra kết nối Gmail.");
     } finally {
@@ -172,14 +223,18 @@ export default function EmailsPage() {
               </p>
             )}
 
-            {inboxEmails && inboxEmails.length === 0 && (
+            {displayedEmails && displayedEmails.length === 0 && (
               <p className="text-sm text-zinc-400 text-center py-6">Inbox trống.</p>
             )}
 
-            {inboxEmails && inboxEmails.length > 0 && (
-              <div className="divide-y divide-zinc-100">
-                {inboxEmails.map((email) => (
-                  <div key={email.gmail_message_id} className="py-3 flex gap-3 items-start">
+            {displayedEmails && displayedEmails.length > 0 && (
+              <div className="divide-y divide-zinc-100 -mx-4 sm:mx-0">
+                {displayedEmails.map((email) => (
+                  <div
+                    key={email.gmail_message_id}
+                    onClick={() => setSelectedEmail(email)}
+                    className="py-3 px-4 flex gap-3 items-start hover:bg-zinc-50 cursor-pointer transition-colors"
+                  >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-baseline gap-2 mb-0.5">
                         <span className="text-sm font-medium text-zinc-800 truncate">
@@ -192,20 +247,34 @@ export default function EmailsPage() {
                         <p className="text-xs text-zinc-400 truncate mt-0.5">{email.snippet}</p>
                       )}
                     </div>
+                    <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                      {email.category && (
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                            CATEGORY_STYLES[email.category.toLowerCase()] ?? "bg-zinc-100 text-zinc-600"
+                          }`}
+                        >
+                          {email.category}
+                        </span>
+                      )}
+                      {email.priority_score != null && (
+                        <span className="text-xs text-zinc-400">P{email.priority_score}</span>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
             )}
 
-            {!inboxEmails && !loadingInbox && !inboxError && (
+            {!displayedEmails && !loadingInbox && !inboxError && (
               <p className="text-sm text-zinc-400 text-center py-6">
                 Nhấn "Tải Inbox" để xem email.
               </p>
             )}
           </section>
 
-          {/* ── AI Processing Pipeline ── */}
-          <section className="card">
+          {/* ── AI Processing Pipeline (admin only) ── */}
+          {isAdmin && <section className="card">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-sm font-semibold text-zinc-800">AI Email Pipeline</h2>
@@ -274,38 +343,23 @@ export default function EmailsPage() {
                     <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-3">
                       Chi tiết từng email
                     </h3>
-                    <div className="divide-y divide-zinc-100 -mx-4 sm:mx-0 sm:rounded-lg sm:border sm:border-zinc-100 overflow-hidden">
-                      {processResult.processed_emails.map((item: ProcessedEmailDetail) => (
-                        <div key={item.gmail_message_id} className="px-4 py-3 bg-white hover:bg-zinc-50 transition-colors">
-                          <div className="flex items-start justify-between gap-3 mb-1">
-                            <div className="min-w-0 flex-1">
-                              <p className="text-sm font-medium text-zinc-800 truncate">
-                                {item.subject || "(no subject)"}
-                              </p>
-                              <p className="text-xs text-zinc-400 truncate">{item.sender || "—"}</p>
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <CategoryBadge category={item.category} />
-                              <span className="text-xs text-zinc-400">P{item.priority_score}</span>
-                              {item.has_draft && (
-                                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
-                                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                  </svg>
-                                  Draft
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <p className="text-xs text-zinc-500 line-clamp-2">{item.summary}</p>
-                          {item.draft_subject && (
-                            <p className="text-xs text-zinc-400 mt-1 italic">
-                              Nháp: {item.draft_subject}
-                            </p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                    <EmailTable
+                      emails={processResult.processed_emails}
+                      onSelect={(email) =>
+                        setSelectedEmail({
+                          gmail_message_id: email.gmail_message_id,
+                          thread_id: null,
+                          subject: email.subject,
+                          sender: email.sender,
+                          date: null,
+                          snippet: email.summary,
+                          analysis: null,
+                          isAnalyzing: false,
+                          category: email.category,
+                          priority_score: email.priority_score,
+                        })
+                      }
+                    />
                   </div>
                 )}
 
@@ -329,10 +383,10 @@ export default function EmailsPage() {
                 Nhấn "Process Emails" để chạy AI pipeline.
               </p>
             )}
-          </section>
+          </section>}
 
-          {/* ── Spam Cleanup ── */}
-          <section className="card">
+          {/* ── Spam Cleanup (admin only) ── */}
+          {isAdmin && <section className="card">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-sm font-semibold text-zinc-800 mb-1">Spam Cleanup</h2>
@@ -377,12 +431,20 @@ export default function EmailsPage() {
                 {cleanupResult.message}
               </div>
             )}
-          </section>
+          </section>}
 
         </div>
       </Layout>
 
       <NotificationToast />
+      <EmailDetailSheet
+        email={selectedEmail}
+        onClose={() => setSelectedEmail(null)}
+        onAnalysisComplete={(id, result) => {
+          analysisCacheRef.current.set(id, result);
+        }}
+        isAdmin={isAdmin}
+      />
     </>
   );
 }

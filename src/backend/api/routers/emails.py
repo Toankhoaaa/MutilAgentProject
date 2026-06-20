@@ -17,16 +17,20 @@ from backend.api.auth_dependencies import get_current_user
 from backend.api.dependencies import (
     check_quota,
     get_analysis_agent,
+    get_calendar_service,
     get_classifier_agent,
     get_db,
     get_gmail_service,
     get_response_agent,
     get_scheduling_agent,
+    get_security_agent,
     increment_request_count,
 )
+from backend.services.calendar_service import CalendarServiceError, GoogleCalendarService
 from backend.core import task_manager
 from backend.core.websocket_manager import manager
 from backend.models.email_scheduling import EmailScheduling
+from backend.models.snoozed_email import SnoozedEmail
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory
 from backend.schemas.api_schemas import (
@@ -37,6 +41,8 @@ from backend.schemas.api_schemas import (
     ProcessEmailRequest,
     ProcessEmailResult,
     ProcessEmailsResponse,
+    QuickClassifyItem,
+    QuickClassifyResult,
     ScheduleEventResponse,
 )
 from backend.services.agents import (
@@ -44,6 +50,7 @@ from backend.services.agents import (
     EmailClassifierAgent,
     EmailResponseAgent,
     EmailSchedulingAgent,
+    EmailSecurityAgent,
 )
 from backend.services.gmail_service import GmailAPIError, GmailAuthenticationError, GmailService
 from backend.services.orchestrator import EmailOrchestrator
@@ -286,15 +293,21 @@ async def analyze_email(
     db: Session = Depends(get_db),
     analysis_agent: EmailAnalysisAgent = Depends(get_analysis_agent),
     scheduling_agent: EmailSchedulingAgent = Depends(get_scheduling_agent),
+    security_agent: EmailSecurityAgent = Depends(get_security_agent),
 ) -> AnalyzeEmailResponse:
     """Deep-analyze an email and optionally persist a detected calendar event."""
-    analysis_result, scheduling_result = await asyncio.gather(
+    analysis_result, scheduling_result, security_result = await asyncio.gather(
         analysis_agent.analyze(
             email_subject=payload.subject,
             email_body=payload.body,
             email_sender=payload.sender,
         ),
         scheduling_agent.extract_schedule(
+            email_subject=payload.subject,
+            email_body=payload.body,
+            sender=payload.sender or "",
+        ),
+        security_agent.analyze(
             email_subject=payload.subject,
             email_body=payload.body,
             sender=payload.sender or "",
@@ -339,6 +352,15 @@ async def analyze_email(
             "scheduling_id": scheduling_id,
         })
 
+    if security_result.risk_level == "high":
+        await manager.broadcast({
+            "type": "SECURITY_ALERT",
+            "risk_level": "high",
+            "warnings": security_result.warnings,
+            "sender": payload.sender,
+            "subject": payload.subject,
+        })
+
     increment_request_count(current_user, db)
     return AnalyzeEmailResponse(
         summary=analysis_result.summary,
@@ -349,6 +371,9 @@ async def analyze_email(
         has_event=has_event,
         event_details=event_details,
         scheduling_id=scheduling_id,
+        is_safe=security_result.is_safe,
+        risk_level=security_result.risk_level,
+        warnings=security_result.warnings,
     )
 
 
@@ -376,6 +401,9 @@ def list_scheduled_events(
             status=row.status,
             emailSnippet=row.event_title or "",
             alternativeSlots=[],
+            html_link=row.google_calendar_html_link,
+            meet_link=row.google_meet_link,
+            is_synced=bool(row.google_calendar_event_id),
         )
         for row in rows
     ]
@@ -383,19 +411,173 @@ def list_scheduled_events(
 
 @router.post(
     "/scheduled-events/{scheduling_id}/confirm",
-    summary="Confirm a pending calendar event",
-    description="Marks an ``email_schedulings`` row as CONFIRMED.",
+    summary="Confirm a pending calendar event and sync to Google Calendar",
+    description=(
+        "Creates a Google Calendar event, persists the event ID and links, "
+        "then marks the row as CONFIRMED. If Calendar API fails the DB is not mutated."
+    ),
 )
-def confirm_scheduled_event(
+async def confirm_scheduled_event(
     scheduling_id: uuid.UUID,
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
+    calendar_service: GoogleCalendarService = Depends(get_calendar_service),
 ) -> dict:
-    """Mark a scheduling event as confirmed."""
+    """Create a Calendar event then mark the scheduling row as CONFIRMED."""
     row = db.get(EmailScheduling, scheduling_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Scheduling event not found.")
+    if row.status == "CONFIRMED":
+        return {
+            "message": "Event already confirmed.",
+            "id": str(row.id),
+            "html_link": row.google_calendar_html_link,
+            "meet_link": row.google_meet_link,
+        }
+
+    start_iso = row.start_datetime.isoformat() if row.start_datetime else None
+    end_iso = row.end_datetime.isoformat() if row.end_datetime else None
+    if not start_iso or not end_iso:
+        raise HTTPException(status_code=400, detail="Event is missing start or end time.")
+
+    try:
+        result = await calendar_service.create_event(
+            summary=row.event_title or "(No title)",
+            start_time=start_iso,
+            end_time=end_iso,
+            attendees=row.attendees or None,
+            description=row.suggested_reply or None,
+        )
+    except CalendarServiceError as exc:
+        raise HTTPException(status_code=500, detail=f"Google Calendar error: {exc}") from exc
+
+    row.google_calendar_event_id = result.get("event_id")
+    row.google_calendar_html_link = result.get("html_link")
+    row.google_meet_link = result.get("meet_link")
     row.status = "CONFIRMED"
     row.updated_at = datetime.now(timezone.utc)
     db.commit()
-    return {"message": "Event confirmed.", "id": str(row.id)}
+
+    return {
+        "message": "Event confirmed.",
+        "id": str(row.id),
+        "html_link": row.google_calendar_html_link,
+        "meet_link": row.google_meet_link,
+    }
+
+
+@router.delete(
+    "/scheduled-events/{scheduling_id}/cancel",
+    summary="Cancel a confirmed calendar event",
+    description="Deletes the event from Google Calendar (if synced) and marks the row as CANCELLED.",
+)
+async def cancel_scheduled_event(
+    scheduling_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    calendar_service: GoogleCalendarService = Depends(get_calendar_service),
+) -> dict:
+    """Delete the Google Calendar event (if present) and mark the row CANCELLED."""
+    row = db.get(EmailScheduling, scheduling_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+
+    if row.google_calendar_event_id:
+        try:
+            await calendar_service.delete_event(row.google_calendar_event_id)
+        except CalendarServiceError as exc:
+            raise HTTPException(status_code=500, detail=f"Google Calendar error: {exc}") from exc
+
+    row.status = "CANCELLED"
+    row.google_calendar_event_id = None
+    row.google_calendar_html_link = None
+    row.google_meet_link = None
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return {"message": "Event cancelled.", "id": str(row.id)}
+
+
+class SnoozeEmailRequest(BaseModel):
+    gmail_message_id: str
+    thread_id: str | None = None
+    subject: str | None = None
+    sender: str | None = None
+    snooze_until: datetime
+
+
+@router.post(
+    "/snooze",
+    summary="Snooze an email until a given time",
+    description=(
+        "Persists a snooze record and schedules a one-shot APScheduler job that "
+        "broadcasts a ``SNOOZED_EMAIL_DUE`` WebSocket event when the time expires."
+    ),
+)
+async def snooze_email(
+    payload: SnoozeEmailRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    from backend.core.scheduler import schedule_snooze
+
+    if payload.snooze_until <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="snooze_until must be in the future.")
+
+    row = SnoozedEmail(
+        gmail_message_id=payload.gmail_message_id,
+        thread_id=payload.thread_id,
+        subject=payload.subject,
+        sender=payload.sender,
+        snooze_until=payload.snooze_until,
+        status="PENDING",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    schedule_snooze(str(row.id), row.snooze_until)
+
+    return {
+        "snooze_id": str(row.id),
+        "snooze_until": row.snooze_until.isoformat(),
+        "message": "Email snoozed successfully.",
+    }
+
+
+@router.post(
+    "/classify-quick",
+    response_model=list[QuickClassifyResult],
+    summary="Batch classify email threads (lightweight)",
+    description=(
+        "Classifies a batch of threads concurrently using only subject/snippet. "
+        "No draft generation, no DB writes — designed for inbox badge rendering."
+    ),
+)
+async def classify_quick(
+    items: list[QuickClassifyItem],
+    current_user: User = Depends(get_current_user),
+    classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
+) -> list[QuickClassifyResult]:
+    """Concurrently classify each thread and return category + priority without any side effects."""
+    if not items:
+        return []
+    results = await asyncio.gather(
+        *(
+            classifier_agent.classify(
+                subject=item.subject,
+                body=item.snippet,
+                sender=item.sender or "",
+            )
+            for item in items
+        )
+    )
+    return [
+        QuickClassifyResult(
+            thread_id=item.thread_id,
+            category=str(result.category.value),
+            priority_score=result.priority_score,
+            confidence=result.confidence,
+        )
+        for item, result in zip(items, results)
+    ]

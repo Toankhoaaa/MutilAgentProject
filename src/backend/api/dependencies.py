@@ -14,7 +14,9 @@ from backend.services.agents import (
     EmailClassifierAgent,
     EmailResponseAgent,
     EmailSchedulingAgent,
+    EmailSecurityAgent,
 )
+from backend.services.calendar_service import GoogleCalendarService
 from backend.services.gmail_service import (
     GmailAuthenticationError,
     GmailService,
@@ -24,10 +26,12 @@ from backend.services.gmail_service import (
 __all__ = [
     "get_db",
     "get_gmail_service",
+    "get_calendar_service",
     "get_classifier_agent",
     "get_response_agent",
     "get_analysis_agent",
     "get_scheduling_agent",
+    "get_security_agent",
     "require_admin",
     "check_quota",
     "increment_request_count",
@@ -96,6 +100,25 @@ def get_gmail_service(
     return GmailService(credentials=creds)
 
 
+def get_calendar_service(
+    current_user: User = Depends(get_current_user),
+) -> GoogleCalendarService:
+    """Build Google Calendar API client from the logged-in user's stored OAuth token."""
+    if not current_user.google_oauth_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Google OAuth token missing. Please sign in again.",
+        )
+    try:
+        creds = google_credentials_from_token_json(current_user.google_oauth_token)
+    except GmailAuthenticationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        ) from exc
+    return GoogleCalendarService(credentials=creds)
+
+
 def get_classifier_agent() -> EmailClassifierAgent:
     """Provide the email classifier agent."""
     return EmailClassifierAgent()
@@ -118,5 +141,13 @@ def get_scheduling_agent() -> EmailSchedulingAgent:
     """Provide the scheduling extraction agent."""
     try:
         return EmailSchedulingAgent()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+def get_security_agent() -> EmailSecurityAgent:
+    """Provide the email security analysis agent."""
+    try:
+        return EmailSecurityAgent()
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc

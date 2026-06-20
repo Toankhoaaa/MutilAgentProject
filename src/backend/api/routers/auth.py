@@ -13,11 +13,13 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.api.auth_dependencies import get_current_user
 from backend.core.config import settings
 from backend.core.database import get_db
-from backend.core.security import create_access_token
+from backend.core.security import create_access_token, get_password_hash, verify_password
 from backend.models.user import User
 from backend.schemas.api_schemas import TokenResponse, UserProfileResponse
+from backend.schemas.auth_schemas import AdminLoginRequest, AdminRegisterRequest, AdminTokenResponse
 
 
 logger = logging.getLogger(__name__)
@@ -145,8 +147,9 @@ async def callback(
         token_json=token_json,
     )
     request.session["user_id"] = str(user.id)
-    dashboard_url = f"{settings.FRONTEND_URL.rstrip('/')}/dashboard"
-    return RedirectResponse(url=dashboard_url, status_code=status.HTTP_302_FOUND)
+    dest = "/admin" if user.is_admin else "/dashboard"
+    redirect_url = f"{settings.FRONTEND_URL.rstrip('/')}{dest}"
+    return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
 
 @router.get("/token", response_model=TokenResponse)
@@ -162,7 +165,7 @@ def get_token(request: Request, db: Session = Depends(get_db)) -> TokenResponse:
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive.")
-    token = create_access_token(user_id=user.id, email=user.email)
+    token = create_access_token(user_id=user.id, email=user.email, is_admin=user.is_admin)
     return TokenResponse(
         access_token=token,
         expires_in_minutes=settings.JWT_EXPIRE_MINUTES,
@@ -171,30 +174,9 @@ def get_token(request: Request, db: Session = Depends(get_db)) -> TokenResponse:
 
 
 @router.get("/me", response_model=UserProfileResponse)
-def me(request: Request, db: Session = Depends(get_db)) -> UserProfileResponse:
-    """Return the logged-in user from the Starlette session cookie."""
-    user_id_raw = request.session.get("user_id")
-    if not user_id_raw:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated.",
-        )
-
-    try:
-        user_id = UUID(str(user_id_raw))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid session.",
-        ) from exc
-
-    user = db.get(User, user_id)
-    if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive.",
-        )
-    return UserProfileResponse.model_validate(user)
+def me(current_user: User = Depends(get_current_user)) -> UserProfileResponse:
+    """Return the authenticated user (session cookie or Bearer JWT)."""
+    return UserProfileResponse.model_validate(current_user)
 
 
 @router.get("/logout")
@@ -203,3 +185,43 @@ def logout(request: Request) -> RedirectResponse:
     request.session.clear()
     login_url = f"{settings.FRONTEND_URL.rstrip('/')}/login"
     return RedirectResponse(url=login_url, status_code=status.HTTP_302_FOUND)
+
+
+@router.post("/admin/register", status_code=status.HTTP_201_CREATED)
+def admin_register(payload: AdminRegisterRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Register a new admin account protected by a server-side secret key."""
+    if payload.secret_key != settings.ADMIN_REGISTRATION_SECRET:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid registration secret.")
+
+    existing = db.scalar(select(User).where(User.email == payload.email))
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
+
+    user = User(
+        email=payload.email,
+        display_name=payload.display_name,
+        hashed_password=get_password_hash(payload.password),
+        is_admin=True,
+        is_active=True,
+        subscription_tier="ENTERPRISE",
+    )
+    db.add(user)
+    db.commit()
+    return {"message": "Admin account created successfully."}
+
+
+@router.post("/admin/login", response_model=AdminTokenResponse)
+def admin_login(payload: AdminLoginRequest, db: Session = Depends(get_db)) -> AdminTokenResponse:
+    """Authenticate an admin via email + password and return a JWT."""
+    user = db.scalar(select(User).where(User.email == payload.email))
+    if user is None or not user.hashed_password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
+
+    if not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
+
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint is for admins only.")
+
+    token = create_access_token(user_id=user.id, email=user.email, is_admin=True)
+    return AdminTokenResponse(access_token=token)
