@@ -41,9 +41,16 @@ class PrivacyAgent:
     def mask_email_dict(self, raw_email: dict[str, Any]) -> dict[str, Any]:
         """Return a shallow copy of *raw_email* with content fields masked.
 
-        Only ``body``, ``subject``, and ``snippet`` are redacted — routing
-        fields (``sender``, ``gmail_message_id``, ``thread_id``) are left
-        intact so downstream dispatch logic continues to work.
+        ``body``, ``subject``, and ``snippet`` are redacted.
+
+        ``sender`` is intentionally left unmasked: SecurityAgent must see the
+        real From address to detect domain spoofing (e.g. a display name that
+        claims to be PayPal while the actual domain is paypal-secure.xyz).
+        Callers that pass ``sender`` to non-security LLMs should call
+        ``self.mask(sender)`` themselves before forwarding the value.
+
+        Other routing fields (``gmail_message_id``, ``thread_id``) are also
+        left intact so downstream dispatch logic continues to work.
         """
         return {
             **raw_email,

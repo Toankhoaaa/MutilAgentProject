@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 logger = logging.getLogger(__name__)
 
 _JOB_ID = "poll_emails"
+_SPAM_CLEANUP_JOB_ID = "daily_spam_cleanup"
+_EXPIRY_JOB_ID = "daily_subscription_expiry"
 _DEFAULT_INTERVAL_MINUTES = 5
+_FREE_BASELINE_MAX_REQUESTS = 100
 
 scheduler = AsyncIOScheduler()
 _interval_minutes: int = _DEFAULT_INTERVAL_MINUTES
 _last_run_at: datetime | None = None
+_run_lock = asyncio.Lock()
 
 
 def get_status() -> dict:
@@ -42,44 +49,134 @@ async def _poll_job() -> None:
     """Called by APScheduler on each tick — imports lazily to avoid circular deps."""
     global _last_run_at
 
-    from backend.api.dependencies import get_classifier_agent, get_response_agent
+    if _run_lock.locked():
+        logger.info("Poll skipped — a run is already in progress.")
+        return
+    async with _run_lock:
+        from backend.api.dependencies import get_classifier_agent, get_response_agent
+        from backend.core.database import SessionLocal
+        from backend.models.user import User
+        from backend.services.gmail_service import GmailService, google_credentials_from_token_json
+        from backend.services.orchestrator import EmailOrchestrator
+        from sqlalchemy import select
+
+        _last_run_at = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            user = db.scalar(select(User).where(User.is_active.is_(True)).limit(1))
+            if user is None or not user.google_oauth_token:
+                logger.info("Scheduler: no active user with OAuth token — skipping poll.")
+                return
+
+            creds = google_credentials_from_token_json(user.google_oauth_token)
+            gmail_service = GmailService(credentials=creds)
+            orchestrator = EmailOrchestrator(
+                db=db,
+                gmail_service=gmail_service,
+                classifier_agent=get_classifier_agent(),
+                response_agent=get_response_agent(),
+                user_id=user.id,
+            )
+            summary = await orchestrator.process_new_emails(limit=10)
+            logger.info(
+                "Scheduler poll complete — fetched=%s processed=%s drafts=%s",
+                summary["fetched"],
+                summary["processed"],
+                summary["drafts_created"],
+            )
+
+            refreshed = gmail_service.credentials_to_json()
+            if refreshed != user.google_oauth_token:
+                user.google_oauth_token = refreshed
+                db.commit()
+        except Exception as exc:
+            logger.exception("Scheduler poll failed: %s", exc)
+        finally:
+            db.close()
+
+
+async def _spam_cleanup_job() -> None:
+    """Daily job: move all SPAM folder messages to trash for every active user."""
     from backend.core.database import SessionLocal
     from backend.models.user import User
     from backend.services.gmail_service import GmailService, google_credentials_from_token_json
-    from backend.services.orchestrator import EmailOrchestrator
     from sqlalchemy import select
 
-    _last_run_at = datetime.now(timezone.utc)
     db = SessionLocal()
     try:
-        user = db.scalar(select(User).where(User.is_active.is_(True)).limit(1))
-        if user is None or not user.google_oauth_token:
-            logger.info("Scheduler: no active user with OAuth token — skipping poll.")
+        users = db.scalars(select(User).where(User.is_active.is_(True))).all()
+        for user in users:
+            if not user.google_oauth_token:
+                continue
+            try:
+                creds = google_credentials_from_token_json(user.google_oauth_token)
+                gmail_service = GmailService(credentials=creds)
+                result = await gmail_service.cleanup_spam_folder()
+                logger.info(
+                    "Daily spam cleanup for user %s: trashed=%s errors=%s",
+                    user.id,
+                    result["trashed"],
+                    result["errors"],
+                )
+                refreshed = gmail_service.credentials_to_json()
+                if refreshed != user.google_oauth_token:
+                    user.google_oauth_token = refreshed
+                    db.commit()
+            except Exception as exc:
+                logger.error("Spam cleanup failed for user %s: %s", user.id, exc)
+    except Exception as exc:
+        logger.exception("Daily spam cleanup job failed: %s", exc)
+    finally:
+        db.close()
+
+
+async def _check_subscription_expiry() -> None:
+    """Daily job: downgrade expired paid tiers to FREE and broadcast a WS notification."""
+    from backend.core.database import SessionLocal
+    from backend.core.websocket_manager import manager
+    from backend.models.user import User
+    from sqlalchemy import select, update
+
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        expired = db.scalars(
+            select(User).where(
+                User.tier_expires_at < now,
+                User.subscription_tier != "FREE",
+            )
+        ).all()
+
+        if not expired:
+            logger.info("Subscription expiry check: no expired tiers found.")
             return
 
-        creds = google_credentials_from_token_json(user.google_oauth_token)
-        gmail_service = GmailService(credentials=creds)
-        orchestrator = EmailOrchestrator(
-            db=db,
-            gmail_service=gmail_service,
-            classifier_agent=get_classifier_agent(),
-            response_agent=get_response_agent(),
-            user_id=user.id,
+        expired_ids = [u.id for u in expired]
+        db.execute(
+            update(User)
+            .where(User.id.in_(expired_ids))
+            .values(
+                subscription_tier="FREE",
+                max_requests=_FREE_BASELINE_MAX_REQUESTS,
+            )
+            .execution_options(synchronize_session=False)
         )
-        summary = await orchestrator.process_new_emails(limit=10)
-        logger.info(
-            "Scheduler poll complete — fetched=%s processed=%s drafts=%s",
-            summary["fetched"],
-            summary["processed"],
-            summary["drafts_created"],
-        )
+        db.commit()
 
-        refreshed = gmail_service.credentials_to_json()
-        if refreshed != user.google_oauth_token:
-            user.google_oauth_token = refreshed
-            db.commit()
+        for user in expired:
+            await manager.broadcast(
+                {
+                    "type": "SUBSCRIPTION_EXPIRED",
+                    "user_id": str(user.id),
+                    "message": "Your account tier has expired and has been downgraded to FREE.",
+                },
+                target_user_id=user.id,
+            )
+
+        logger.info("Subscription expiry check: downgraded %d user(s) to FREE.", len(expired_ids))
     except Exception as exc:
-        logger.exception("Scheduler poll failed: %s", exc)
+        logger.exception("Subscription expiry job failed: %s", exc)
+        db.rollback()
     finally:
         db.close()
 
@@ -88,6 +185,18 @@ def start_scheduler() -> None:
     if scheduler.running:
         return
     scheduler.add_job(_poll_job, _make_trigger(), id=_JOB_ID, replace_existing=True)
+    scheduler.add_job(
+        _spam_cleanup_job,
+        IntervalTrigger(hours=24),
+        id=_SPAM_CLEANUP_JOB_ID,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _check_subscription_expiry,
+        IntervalTrigger(hours=24),
+        id=_EXPIRY_JOB_ID,
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info("Email poll scheduler started (interval=%s min).", _interval_minutes)
 
@@ -108,4 +217,189 @@ def update_interval(minutes: int) -> None:
 
 async def run_now() -> None:
     """Fire a single poll immediately without waiting for the next tick."""
+    if _run_lock.locked():
+        raise RuntimeError("A poll run is already in progress.")
     await _poll_job()
+
+
+# ── Snooze jobs ───────────────────────────────────────────────────────────────
+
+def _snooze_job_id(snooze_id: str) -> str:
+    return f"snooze_{snooze_id}"
+
+
+async def _snooze_notify_job(snooze_id: str) -> None:
+    """Fire when a snoozed email is due — broadcast WS event and mark NOTIFIED."""
+    from backend.core.database import SessionLocal
+    from backend.core.websocket_manager import manager
+    from backend.models.snoozed_email import SnoozedEmail
+
+    db = SessionLocal()
+    try:
+        row = db.get(SnoozedEmail, uuid.UUID(snooze_id))
+        if row is None or row.status != "PENDING":
+            return
+        row.status = "NOTIFIED"
+        db.commit()
+        await manager.broadcast(
+            {
+                "type": "SNOOZED_EMAIL_DUE",
+                "snooze_id": snooze_id,
+                "gmail_message_id": row.gmail_message_id,
+                "thread_id": row.thread_id,
+                "subject": row.subject or "",
+                "sender": row.sender or "",
+            },
+            target_user_id=row.user_id,  # None for legacy rows → falls back to no-op (no clients)
+        )
+    except Exception as exc:
+        logger.exception("Snooze notify job failed for %s: %s", snooze_id, exc)
+    finally:
+        db.close()
+
+
+def schedule_snooze(snooze_id: str, snooze_until: datetime) -> None:
+    """Schedule a one-shot job that fires when the snooze expires."""
+    scheduler.add_job(
+        _snooze_notify_job,
+        DateTrigger(run_date=snooze_until),
+        id=_snooze_job_id(snooze_id),
+        args=[snooze_id],
+        replace_existing=True,
+    )
+    logger.info("Snooze job scheduled: id=%s fire_at=%s", snooze_id, snooze_until.isoformat())
+
+
+async def restore_snooze_jobs() -> None:
+    """Re-register APScheduler jobs for all PENDING snoozed emails after a restart.
+
+    Jobs that fired while the server was down are rescheduled 5 seconds after
+    startup so they are not silently dropped.
+    """
+    from backend.core.database import SessionLocal
+    from backend.models.snoozed_email import SnoozedEmail
+    from sqlalchemy import select
+
+    now = datetime.now(timezone.utc)
+    catchup_at = now + timedelta(seconds=5)
+    db = SessionLocal()
+    try:
+        rows = db.scalars(
+            select(SnoozedEmail).where(SnoozedEmail.status == "PENDING")
+        ).all()
+        future_count = overdue_count = 0
+        for row in rows:
+            snooze_until = row.snooze_until.replace(tzinfo=timezone.utc) if row.snooze_until.tzinfo is None else row.snooze_until
+            if snooze_until > now:
+                schedule_snooze(str(row.id), snooze_until)
+                future_count += 1
+            else:
+                schedule_snooze(str(row.id), catchup_at)
+                overdue_count += 1
+        logger.info(
+            "Restored %d pending snooze job(s): %d future, %d overdue (firing in 5 s).",
+            len(rows),
+            future_count,
+            overdue_count,
+        )
+    except Exception as exc:
+        logger.exception("Failed to restore snooze jobs: %s", exc)
+    finally:
+        db.close()
+
+
+# ── Task reminder jobs ─────────────────────────────────────────────────────────
+
+def _task_reminder_job_id(task_id: str) -> str:
+    return f"task_reminder_{task_id}"
+
+
+async def _task_reminder_job(task_id: str) -> None:
+    """Fire when a task reminder is due — broadcast WS notification to the task owner."""
+    from backend.core.database import SessionLocal
+    from backend.core.websocket_manager import manager
+    from backend.models.task import Task
+
+    db = SessionLocal()
+    try:
+        row = db.get(Task, uuid.UUID(task_id))
+        if row is None or row.status in ("done", "dismissed"):
+            return
+        await manager.broadcast(
+            {
+                "type": "TASK_REMINDER",
+                "task_id": task_id,
+                "title": row.title,
+                "deadline": row.deadline.isoformat() if row.deadline else None,
+                "priority": row.priority,
+            },
+            target_user_id=row.user_id,
+        )
+        logger.info("Task reminder fired: task_id=%s user_id=%s", task_id, row.user_id)
+    except Exception as exc:
+        logger.exception("Task reminder job failed for %s: %s", task_id, exc)
+    finally:
+        db.close()
+
+
+def schedule_task_reminder(task_id: str, remind_at: datetime) -> None:
+    """Schedule (or reschedule) a one-shot reminder job for a task."""
+    scheduler.add_job(
+        _task_reminder_job,
+        DateTrigger(run_date=remind_at),
+        id=_task_reminder_job_id(task_id),
+        args=[task_id],
+        replace_existing=True,
+    )
+    logger.info("Task reminder scheduled: task_id=%s fire_at=%s", task_id, remind_at.isoformat())
+
+
+def cancel_task_reminder(task_id: str) -> None:
+    """Remove the APScheduler job for a task reminder, if it exists."""
+    job_id = _task_reminder_job_id(task_id)
+    if scheduler.get_job(job_id) is not None:
+        scheduler.remove_job(job_id)
+        logger.info("Task reminder cancelled: task_id=%s", task_id)
+
+
+async def restore_task_reminders() -> None:
+    """Re-register APScheduler jobs for all tasks with a pending remind_at after a restart.
+
+    Tasks whose remind_at fired while the server was down are rescheduled 5 seconds
+    after startup so they are not silently dropped (same catch-up pattern as snooze).
+    """
+    from backend.core.database import SessionLocal
+    from backend.models.task import Task
+    from sqlalchemy import select
+
+    now = datetime.now(timezone.utc)
+    catchup_at = now + timedelta(seconds=5)
+    db = SessionLocal()
+    try:
+        rows = db.scalars(
+            select(Task).where(
+                Task.remind_at.is_not(None),
+                Task.status.not_in(["done", "dismissed"]),
+            )
+        ).all()
+        future_count = overdue_count = 0
+        for row in rows:
+            remind_at = row.remind_at
+            if remind_at.tzinfo is None:
+                remind_at = remind_at.replace(tzinfo=timezone.utc)
+            if remind_at > now:
+                schedule_task_reminder(str(row.id), remind_at)
+                future_count += 1
+            else:
+                schedule_task_reminder(str(row.id), catchup_at)
+                overdue_count += 1
+        logger.info(
+            "Restored %d task reminder job(s): %d future, %d overdue (firing in 5 s).",
+            len(rows),
+            future_count,
+            overdue_count,
+        )
+    except Exception as exc:
+        logger.exception("Failed to restore task reminder jobs: %s", exc)
+    finally:
+        db.close()

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.api.dependencies import get_classifier_agent, get_db, get_response_agent
+from backend.api.auth_dependencies import get_current_user
+from backend.api.dependencies import get_classifier_agent, get_db, get_response_agent, require_admin
 from backend.models.agent_run import AgentRun
+from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, EmailResponseOutput
 from backend.schemas.api_schemas import (
     AgentRunResponse,
@@ -18,7 +20,10 @@ from backend.schemas.api_schemas import (
     DraftTestRequest,
 )
 from backend.services.agents import EmailClassifierAgent, EmailResponseAgent
+from backend.services.agents.privacy_agent import PrivacyAgent
 from backend.services.agents.response_agent import ResponseAgentSkippedError
+
+_privacy = PrivacyAgent()
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +39,20 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
         "``agent_runs`` batch record."
     ),
 )
-def get_agent_status(db: Session = Depends(get_db)) -> AgentStatusResponse:
+def get_agent_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AgentStatusResponse:
     """
     Report whether the system is idle, running a batch, or in a degraded state.
 
     Uses the latest ``agent_runs`` row ordered by ``started_at``.
     """
     latest = db.scalars(
-        select(AgentRun).order_by(AgentRun.started_at.desc().nulls_last()).limit(1)
+        select(AgentRun)
+        .where(AgentRun.user_id == current_user.id)
+        .order_by(AgentRun.started_at.desc().nulls_last())
+        .limit(1)
     ).first()
 
     if latest is None:
@@ -74,6 +85,26 @@ def get_agent_status(db: Session = Depends(get_db)) -> AgentStatusResponse:
     )
 
 
+@router.get(
+    "/runs",
+    response_model=list[AgentRunResponse],
+    summary="Recent agent batch runs",
+    description="Returns the N most recent agent_runs rows ordered by start time descending.",
+)
+def get_recent_runs(
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[AgentRunResponse]:
+    runs = db.scalars(
+        select(AgentRun)
+        .where(AgentRun.user_id == current_user.id)
+        .order_by(AgentRun.started_at.desc().nulls_last())
+        .limit(limit)
+    ).all()
+    return [AgentRunResponse.model_validate(r) for r in runs]
+
+
 @router.post(
     "/classify",
     response_model=EmailClassificationOutput,
@@ -86,6 +117,7 @@ def get_agent_status(db: Session = Depends(get_db)) -> AgentStatusResponse:
 async def test_classify(
     payload: ClassifyTestRequest,
     classifier: EmailClassifierAgent = Depends(get_classifier_agent),
+    _admin: User = Depends(require_admin),
 ) -> EmailClassificationOutput:
     """
     Stateless classification endpoint for prompt and model experimentation.
@@ -94,8 +126,8 @@ async def test_classify(
     """
     try:
         return await classifier.classify(
-            subject=payload.subject,
-            body=payload.body,
+            subject=_privacy.mask(payload.subject),
+            body=_privacy.mask(payload.body),
             sender=payload.sender,
         )
     except Exception as exc:
@@ -115,6 +147,7 @@ async def test_classify(
 async def test_draft(
     payload: DraftTestRequest,
     response_agent: EmailResponseAgent = Depends(get_response_agent),
+    _admin: User = Depends(require_admin),
 ) -> EmailResponseOutput:
     """
     Stateless draft generation for urgent / need_reply categories only.
@@ -139,9 +172,10 @@ async def test_draft(
 
     try:
         return await response_agent.compose_reply(
-            email_subject=payload.email_subject,
-            email_body=payload.email_body,
+            email_subject=_privacy.mask(payload.email_subject),
+            email_body=_privacy.mask(payload.email_body),
             classification=classification,
+            tone=payload.tone,
         )
     except ResponseAgentSkippedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

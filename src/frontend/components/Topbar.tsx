@@ -1,4 +1,6 @@
 import { useRouter } from "next/router";
+import Link from "next/link";
+import { Moon, Bell, LogOut } from "lucide-react";
 import type { UserProfile } from "@/lib/types";
 
 interface TopbarProps {
@@ -17,47 +19,83 @@ function getInitials(user: UserProfile): string {
   return user.email[0].toUpperCase();
 }
 
+const channelTabs = [
+  { label: "Dashboard", href: "/dashboard" },
+  { label: "Emails", href: "/emails" },
+  { label: "Schedules", href: "/schedules" },
+];
+
 export default function Topbar({ user }: TopbarProps) {
   const router = useRouter();
 
   const handleLogout = () => {
+    if (user?.id) {
+      try { sessionStorage.removeItem(`inbox_${user.id}`); } catch {}
+    }
     window.location.href = "/api/v1/auth/logout";
   };
 
-  const getPageTitle = () => {
-    switch (router.pathname) {
-      case "/dashboard": return "Dashboard";
-      default: return "Email Orchestrator";
-    }
+  const getGreeting = () => {
+    const name = user?.display_name?.split(" ")[0] ?? user?.email?.split("@")[0] ?? "there";
+    return `Welcome back, ${name}`;
   };
 
   return (
     <header className="topbar">
-      <div className="flex items-center gap-2">
-        <h1 className="text-lg font-semibold text-slate-800">{getPageTitle()}</h1>
+      {/* Top row: page title + actions */}
+      <div className="topbar-inner">
+        <div className="flex items-center gap-2">
+          <h1 style={{ fontSize: "1rem", fontWeight: 600, color: "var(--color-ink)", margin: 0, letterSpacing: "-0.3px" }}>
+            {channelTabs.find((t) => t.href === router.pathname)?.label ?? "Email Orchestrator"}
+          </h1>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Icon buttons */}
+          <button className="topbar-icon-btn" title="Toggle dark mode" aria-label="Toggle dark mode">
+            <Moon size={15} strokeWidth={1.75} />
+          </button>
+          <button className="topbar-icon-btn" title="Notifications" aria-label="Notifications">
+            <Bell size={15} strokeWidth={1.75} />
+          </button>
+
+          {/* Separator */}
+          <div style={{ width: 1, height: 24, background: "#E8EBF0", margin: "0 0.25rem" }} />
+
+          {/* User greeting + avatar */}
+          {user && (
+            <div className="flex items-center gap-2.5">
+              <div className="hidden sm:block text-right">
+                <p style={{ fontSize: "0.8125rem", fontWeight: 600, color: "#1E293B", lineHeight: 1.2 }}>
+                  {getGreeting()}
+                </p>
+                <p style={{ fontSize: "0.6875rem", color: "#94A3B8", lineHeight: 1.2 }}>{user.email}</p>
+              </div>
+              <div className="avatar">
+                {getInitials(user)}
+              </div>
+            </div>
+          )}
+
+          {/* Logout */}
+          <button onClick={handleLogout} className="btn-logout">
+            <LogOut size={15} strokeWidth={1.75} />
+            <span className="hidden sm:inline">Logout</span>
+          </button>
+        </div>
       </div>
 
-      <div className="flex items-center gap-3">
-        {user && (
-          <div className="flex items-center gap-3">
-            <div className="text-right hidden sm:block">
-              <p className="text-sm font-medium text-slate-700 leading-tight">
-                {user.display_name ?? user.email}
-              </p>
-              <p className="text-xs text-slate-400 leading-tight">{user.email}</p>
-            </div>
-            <div className="avatar">
-              {getInitials(user)}
-            </div>
-          </div>
-        )}
-        <button onClick={handleLogout} className="btn-logout">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-          </svg>
-          <span className="hidden sm:inline">Logout</span>
-        </button>
+      {/* Channel tabs row */}
+      <div className="topbar-tabs">
+        {channelTabs.map((tab) => (
+          <Link
+            key={tab.href}
+            href={tab.href}
+            className={`channel-tab ${router.pathname === tab.href ? "channel-tab-active" : ""}`}
+          >
+            {tab.label}
+          </Link>
+        ))}
       </div>
     </header>
   );

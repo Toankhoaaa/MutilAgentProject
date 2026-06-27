@@ -22,15 +22,26 @@ from backend.api import (
     agents_router,
     audit_router,
     auth_router,
+    chat_router,
     config_router,
+    delegation_settings_router,
+    delegations_router,
+    departments_router,
     emails_router,
+    knowledge_router,
+    pipeline_router,
+    rules_router,
     scheduler_router,
     stats_router,
+    tasks_router,
+    users_router,
     websockets_router,
 )
 from backend.core.config import settings
 from backend.core.database import init_db
-from backend.core.scheduler import start_scheduler, stop_scheduler
+from backend.core.scheduler import restore_snooze_jobs, restore_task_reminders, start_scheduler, stop_scheduler
+from backend.services.calendar_service import CalendarAuthenticationError
+from backend.services.gmail_service import GmailAuthenticationError
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +59,8 @@ APP_VERSION = "1.0.0"
 async def lifespan(app: FastAPI):  # noqa: ARG001
     init_db()
     start_scheduler()
+    await restore_snooze_jobs()
+    await restore_task_reminders()
     yield
     stop_scheduler()
 
@@ -91,13 +104,22 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 
 app.include_router(admin_router, prefix=API_V1_PREFIX)
+app.include_router(users_router, prefix=API_V1_PREFIX)
 app.include_router(auth_router, prefix=API_V1_PREFIX)
+app.include_router(delegation_settings_router, prefix=API_V1_PREFIX)
+app.include_router(delegations_router, prefix=API_V1_PREFIX)
+app.include_router(departments_router, prefix=API_V1_PREFIX)
 app.include_router(emails_router, prefix=API_V1_PREFIX)
 app.include_router(agents_router, prefix=API_V1_PREFIX)
+app.include_router(chat_router, prefix=API_V1_PREFIX)
 app.include_router(config_router, prefix=API_V1_PREFIX)
 app.include_router(audit_router, prefix=API_V1_PREFIX)
+app.include_router(knowledge_router, prefix=API_V1_PREFIX)
+app.include_router(pipeline_router, prefix=API_V1_PREFIX)
+app.include_router(rules_router, prefix=API_V1_PREFIX)
 app.include_router(stats_router, prefix=API_V1_PREFIX)
 app.include_router(scheduler_router, prefix=API_V1_PREFIX)
+app.include_router(tasks_router, prefix=API_V1_PREFIX)
 app.include_router(websockets_router)
 
 
@@ -131,6 +153,24 @@ async def http_exception_handler(
             message=message,
             details=details,
         ),
+    )
+
+
+@app.exception_handler(GmailAuthenticationError)
+async def gmail_auth_error_handler(request: Request, exc: GmailAuthenticationError) -> JSONResponse:
+    logger.warning("Gmail auth error on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content=_error_body("reauth_required", "Google credentials expired. Please sign in again."),
+    )
+
+
+@app.exception_handler(CalendarAuthenticationError)
+async def calendar_auth_error_handler(request: Request, exc: CalendarAuthenticationError) -> JSONResponse:
+    logger.warning("Calendar auth error on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content=_error_body("reauth_required", "Google credentials expired. Please sign in again."),
     )
 
 

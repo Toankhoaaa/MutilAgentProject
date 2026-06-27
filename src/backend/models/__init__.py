@@ -3,23 +3,35 @@ from backend.models.audit_log import AuditLog
 from backend.models.base import Base
 from backend.models.classification import Classification
 from backend.models.configuration import Configuration
+from backend.models.delegation import Delegation
+from backend.models.delegation_item import DelegationItem
+from backend.models.delegation_settings import DelegationSettings
+from backend.models.department import Department
 from backend.models.draft import Draft
-from backend.models.email import Email
-from backend.models.email_analysis import EmailAnalysis
+from backend.models.email_analysis_cache import EmailAnalysisCache
+from backend.models.email_rule import EmailRule
 from backend.models.email_scheduling import EmailScheduling
-from backend.models.processing_queue import ProcessingQueue
+from backend.models.knowledge import KnowledgeDocument
+from backend.models.snoozed_email import SnoozedEmail
+from backend.models.task import Task
 from backend.models.user import User
 
 __all__ = [
     "Base",
     "User",
-    "Email",
-    "EmailAnalysis",
-    "EmailScheduling",
-    "Classification",
-    "Draft",
     "AuditLog",
     "AgentRun",
+    "Classification",
     "Configuration",
-    "ProcessingQueue",
+    "Delegation",
+    "DelegationItem",
+    "DelegationSettings",
+    "Department",
+    "Draft",
+    "EmailAnalysisCache",
+    "EmailRule",
+    "EmailScheduling",
+    "KnowledgeDocument",
+    "SnoozedEmail",
+    "Task",
 ]

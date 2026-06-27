@@ -15,7 +15,10 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
-CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+CALENDAR_SCOPE = (
+    "https://www.googleapis.com/auth/calendar.readonly "
+    "https://www.googleapis.com/auth/calendar.events"
+)
 
 # Vietnam Standard Time (no DST — always UTC+7).
 _VN_TZ = "Asia/Ho_Chi_Minh"
@@ -283,3 +286,24 @@ class GoogleCalendarService:
             "start": created.get("start"),
             "end": created.get("end"),
         }
+
+    async def delete_event(self, event_id: str) -> None:
+        """
+        Delete a Google Calendar event by its event ID.
+
+        Args:
+            event_id: The Google Calendar event ID to delete.
+
+        Raises:
+            CalendarAPIError: When the Calendar API delete call fails.
+        """
+        service = await self._get_service()
+        try:
+            await asyncio.to_thread(
+                lambda: service.events()
+                .delete(calendarId="primary", eventId=event_id, sendUpdates="all")
+                .execute()
+            )
+        except HttpError as exc:
+            raise self._wrap_http_error(exc, "Failed to delete Calendar event.") from exc
+        logger.info("Deleted Calendar event '%s'", event_id)

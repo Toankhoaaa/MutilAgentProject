@@ -8,7 +8,11 @@
     "default_title": "AI Reply Settings"
   },
   "permissions": ["storage", "scripting"],
-  "host_permissions": ["https://mail.google.com/*", "http://localhost:8000/*"],
+  "host_permissions": [
+    "https://mail.google.com/*",
+    "http://localhost:8000/*",
+    "https://mail-attachment.googleusercontent.com/*"
+  ],
   "background": {
     "service_worker": "src/background/service-worker.ts",
     "type": "module"

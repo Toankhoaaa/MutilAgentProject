@@ -19,12 +19,12 @@ from backend.services.llm_service import GeminiService, LLMServiceError
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Few-shot prompt — each example maps a concrete threat pattern to the output
+# Few-shot prompt — CÂN BẰNG: cả ca nguy hiểm lẫn ca an toàn dễ nhầm
 # ---------------------------------------------------------------------------
 _FEW_SHOT_EXAMPLES: str = """
-Few-shot examples (follow the same JSON schema exactly):
+Few-shot examples (tuân thủ chính xác cùng JSON schema):
 
-Example 1 — CEO fraud / BEC (Business Email Compromise):
+Example 1 — CEO fraud / BEC:
 From: "Nguyen Van A CEO" <ceo.nguyenvana@gmail.com>
 Subject: "Gấp: chuyển tiền ngay cho đối tác mới"
 Body: "Tôi đang họp không tiện nghe máy. Em chuyển ngay 200 triệu vào TK 012345678 Vietcombank
@@ -37,128 +37,169 @@ Expected JSON:
     "Giả mạo cấp trên yêu cầu chuyển tiền gấp (CEO Fraud / BEC)",
     "Yêu cầu bảo mật tuyệt đối, không báo ai — dấu hiệu điển hình của lừa đảo",
     "Tên miền người gửi là Gmail cá nhân, không phải email công ty",
-    "Không có thời gian xác minh — tạo áp lực thời hạn giả tạo"
+    "Tạo áp lực thời hạn để ngăn xác minh"
   ]
 }
 
-Example 2 — Credential harvesting / fake login page:
+Example 2 — Credential harvesting:
 From: "security-alert@vietcombank-verify.net"
 Subject: "⚠️ Tài khoản của bạn bị khóa — xác minh ngay"
-Body: "Chúng tôi phát hiện đăng nhập bất thường. Nhấn vào đây để xác minh:
+Body: "Phát hiện đăng nhập bất thường. Nhấn để xác minh:
        http://vietcombank-verify.net/login?token=abc123
-       Nếu không xác minh trong 24h, tài khoản sẽ bị đóng vĩnh viễn."
+       Không xác minh trong 24h, tài khoản sẽ bị đóng vĩnh viễn."
 Expected JSON:
 {
   "is_safe": false,
   "risk_level": "high",
   "warnings": [
     "Tên miền giả mạo ngân hàng: 'vietcombank-verify.net' không phải vietcombank.com.vn",
-    "Link dẫn đến trang thu thập thông tin đăng nhập (Credential Harvesting)",
-    "Đe dọa khóa tài khoản để tạo áp lực hành động ngay",
-    "Tổ chức tài chính thực sự không yêu cầu xác minh qua email như vậy"
+    "Link dẫn đến trang thu thập thông tin đăng nhập (credential harvesting)",
+    "Đe dọa khóa tài khoản để tạo áp lực"
   ]
 }
 
-Example 3 — Lottery / prize scam:
+Example 3 — Lottery / advance-fee scam:
 From: "prize@international-lottery-winner.com"
 Subject: "🎉 Chúc mừng! Bạn đã trúng $500,000 USD"
-Body: "Bạn được chọn ngẫu nhiên để nhận $500,000. Để nhận thưởng, hãy thanh toán phí xử lý
-       $200 USD qua Western Union và gửi thông tin CMND + số tài khoản về địa chỉ này."
+Body: "Bạn được chọn nhận $500,000. Thanh toán phí xử lý $200 qua Western Union
+       và gửi CMND + số tài khoản để nhận thưởng."
 Expected JSON:
 {
   "is_safe": false,
   "risk_level": "high",
   "warnings": [
-    "Lừa đảo trúng thưởng giả mạo (Advance Fee / Lottery Scam)",
-    "Yêu cầu nộp tiền trước để nhận giải thưởng — không có xổ số hợp pháp nào làm vậy",
-    "Yêu cầu thông tin CMND và số tài khoản ngân hàng",
-    "Địa chỉ người gửi là tên miền không xác định, không liên quan đến tổ chức chính thống"
+    "Lừa đảo trúng thưởng (Advance Fee / Lottery Scam)",
+    "Yêu cầu nộp phí trước để nhận giải — không xổ số hợp pháp nào làm vậy",
+    "Yêu cầu thông tin CMND và số tài khoản ngân hàng"
   ]
 }
 
-Example 4 — Sextortion / blackmail:
+Example 4 — Sextortion:
 From: "anonymous@protonmail.com"
-Subject: "Tôi đã quay video bạn — trả tiền hoặc tôi gửi cho danh bạ của bạn"
-Body: "Tôi đã cài phần mềm vào máy tính của bạn và thu thập video nhạy cảm. Chuyển 0.05 Bitcoin
-       vào địa chỉ ví 1A2B3C... trong 48h hoặc tôi gửi cho toàn bộ danh bạ và mạng xã hội."
+Subject: "Trả tiền hoặc tôi gửi video cho danh bạ của bạn"
+Body: "Tôi đã thu thập video nhạy cảm. Chuyển 0.05 Bitcoin vào ví 1A2B3C... trong 48h
+       hoặc tôi gửi cho toàn bộ danh bạ."
 Expected JSON:
 {
   "is_safe": false,
   "risk_level": "high",
   "warnings": [
-    "Tống tiền qua email (Sextortion / Blackmail Scam)",
-    "Tuyên bố giả về việc xâm nhập thiết bị và thu thập dữ liệu — thường không có thật",
-    "Yêu cầu thanh toán bằng tiền điện tử (không truy vết được)",
-    "Tạo áp lực thời gian 48h để ngăn nạn nhân suy nghĩ kỹ"
+    "Tống tiền qua email (Sextortion)",
+    "Yêu cầu thanh toán bằng tiền điện tử không truy vết",
+    "Tạo áp lực 48h để ngăn nạn nhân suy nghĩ"
   ]
 }
 
-Example 5 — Suspicious but medium risk (domain mismatch + urgency):
+Example 5 — Medium: GIẢ MẠO THƯƠNG HIỆU + nhiều tín hiệu (≥2):
 From: "invoices@microsoft-billing.info"
-Subject: "Hóa đơn Microsoft 365 của bạn — thanh toán ngay để tránh gián đoạn dịch vụ"
-Body: "Gói Microsoft 365 của bạn sẽ hết hạn trong 24h. Nhấn đây để gia hạn ngay:
-       http://microsoft-billing.info/renew. Nếu không, toàn bộ dữ liệu sẽ bị xóa."
+Subject: "Hóa đơn Microsoft 365 — thanh toán ngay tránh gián đoạn"
+Body: "Gói của bạn hết hạn trong 24h. Gia hạn ngay: http://microsoft-billing.info/renew.
+       Nếu không, toàn bộ dữ liệu sẽ bị xóa."
 Expected JSON:
 {
   "is_safe": false,
   "risk_level": "medium",
   "warnings": [
-    "Tên miền người gửi 'microsoft-billing.info' không phải microsoft.com",
-    "Đe dọa xóa dữ liệu để tạo áp lực — chiến thuật social engineering",
-    "Link gia hạn dẫn đến tên miền bên thứ ba không xác minh"
+    "Tên miền 'microsoft-billing.info' cố tình gợi thương hiệu Microsoft nhưng không phải microsoft.com",
+    "Link thanh toán dẫn tới tên miền bên thứ ba không xác minh",
+    "Đe dọa xóa dữ liệu để tạo áp lực"
   ]
 }
+# Lý do medium (không phải high): có 3 tín hiệu kết hợp (giả thương hiệu + link thanh toán lạ
+# + đe dọa), nhưng chưa trực tiếp đòi mật khẩu/OTP hay chuyển khoản cá nhân.
 
-Example 6 — Safe, legitimate business email:
+Example 6 — AN TOÀN: email nội bộ thông thường:
 From: "hr@company.com"
-Subject: "Lịch họp toàn công ty — Thứ 6 tuần này lúc 14:00"
-Body: "Kính gửi toàn thể nhân viên, công ty tổ chức họp định kỳ quý II vào thứ 6, 14:00
-       tại phòng họp tầng 3. Vui lòng xác nhận tham dự qua link nội bộ: intranet.company.com/rsvp"
+Subject: "Lịch họp toàn công ty — Thứ 6 lúc 14:00"
+Body: "Kính gửi toàn thể nhân viên, công ty họp định kỳ quý II vào thứ 6, 14:00 tại phòng
+       họp tầng 3. Xác nhận tham dự qua: intranet.company.com/rsvp"
 Expected JSON:
-{
-  "is_safe": true,
-  "risk_level": "low",
-  "warnings": []
-}
+{ "is_safe": true, "risk_level": "low", "warnings": [] }
+
+Example 7 — AN TOÀN: tuyển dụng từ Gmail (DOMAIN KHÁC công ty nhưng hợp lệ):
+From: "Trần Thị HR" <tranthi.recruiter@gmail.com>
+Subject: "Mời ứng tuyển vị trí Backend Developer tại Công ty ABC"
+Body: "Chào bạn, mình là HR công ty ABC. Qua hồ sơ trên TopCV, mình thấy bạn phù hợp vị trí
+       Backend Developer. Bạn gửi CV cập nhật và sắp xếp một buổi phỏng vấn online tuần này
+       nhé? Thông tin công ty: abc.com.vn."
+Expected JSON:
+{ "is_safe": true, "risk_level": "low", "warnings": [] }
+# QUAN TRỌNG: tên miền là Gmail cá nhân, KHÁC công ty ABC. Đây KHÔNG phải mối đe dọa:
+# thư tuyển dụng bình thường, không đòi thông tin nhạy cảm, không link đăng nhập/thanh toán.
+# Domain mismatch ĐỨNG MỘT MÌNH không bao giờ đủ để cảnh báo.
+
+Example 8 — AN TOÀN: thông báo dịch vụ bên thứ ba:
+From: "notifications@github.com"
+Subject: "[GitHub] Build completed successfully"
+Body: "Workflow CI của repository your-project đã chạy thành công. Xem chi tiết tại tab
+       Actions trên GitHub."
+Expected JSON:
+{ "is_safe": true, "risk_level": "low", "warnings": [] }
+
+Example 9 — AN TOÀN: hóa đơn hợp lệ có yêu cầu thanh toán (KHÔNG flag chỉ vì nhắc tiền):
+From: "billing@fpt.com.vn"
+Subject: "Hóa đơn cước Internet tháng 5"
+Body: "Cước tháng 5 của quý khách là 250.000đ. Vui lòng thanh toán trước 10/6 qua ứng dụng
+       Hi FPT hoặc tại điểm giao dịch. Chi tiết tại hoadon.fpt.com.vn."
+Expected JSON:
+{ "is_safe": true, "risk_level": "low", "warnings": [] }
+# Lý do: nhà cung cấp thật, kênh thanh toán chính thống, không link lạ, không đòi OTP/mật khẩu.
 """.strip()
 
+
 # ---------------------------------------------------------------------------
-# Task prompt template
+# Task prompt template — thêm NGUYÊN TẮC GỐC + ngưỡng ≥2 cho medium + field lý luận
 # ---------------------------------------------------------------------------
 _SECURITY_TASK_TEMPLATE: str = """
-Bạn là chuyên gia an ninh mạng. Hãy phân tích email dưới đây và phát hiện các dấu hiệu lừa đảo
-(phishing), gian lận tài chính, tống tiền, hoặc liên kết độc hại.
+Bạn là chuyên gia an ninh email. Phân tích email dưới đây để phát hiện lừa đảo (phishing),
+gian lận tài chính, tống tiền, hoặc liên kết độc hại — đồng thời TRÁNH báo động nhầm
+các email hợp lệ.
 
-Trả về CHỈ một JSON object hợp lệ theo schema sau:
-- is_safe: boolean — true nếu email an toàn, false nếu có rủi ro bảo mật
+NGUYÊN TẮC GỐC (đọc kỹ trước khi phân loại):
+- Mặc định mọi email là AN TOÀN. Chỉ nâng mức rủi ro khi có BẰNG CHỨNG CỤ THỂ về ý định gây hại.
+- Một email chỉ thực sự nguy hiểm khi nó nhằm khiến người nhận làm điều gây hại, ví dụ:
+  lộ thông tin đăng nhập/OTP/mật khẩu/số thẻ; chuyển tiền bất thường; nhấn vào trang
+  đăng nhập hoặc thanh toán giả mạo; bị tống tiền/đe dọa.
+- Tên miền người gửi KHÁC với tổ chức nhắc trong nội dung là chuyện BÌNH THƯỜNG và KHÔNG
+  phải dấu hiệu nguy hiểm nếu đứng một mình. Email hợp lệ rất thường đến từ tên miền cá nhân
+  hoặc bên thứ ba: tuyển dụng (HR qua Gmail / TopCV / LinkedIn), thông báo dịch vụ (GitHub,
+  SaaS), hóa đơn nhà cung cấp, mời họp từ đối tác, newsletter.
+  → Chỉ tính tên miền là dấu hiệu khi nó CỐ TÌNH giả mạo MỘT THƯƠNG HIỆU CỤ THỂ nhằm đánh lừa
+    (vd: vietcombank-verify.net giả Vietcombank), HOẶC khi đi KÈM một yêu cầu nhạy cảm.
+- Việc nhắc đến tiền/hóa đơn/thanh toán KHÔNG tự động là nguy hiểm — hóa đơn hợp lệ là bình thường.
+
+Trả về CHỈ một JSON object hợp lệ, gồm:
+- reasoning: string — 1-2 câu liệt kê các tín hiệu CỤ THỂ quan sát được (hoặc ghi "không có
+  tín hiệu nguy hiểm"). Đây là bước suy luận bắt buộc trước khi kết luận.
+- is_safe: boolean
 - risk_level: "low" | "medium" | "high"
-  * low   — đáng ngờ nhưng không có bằng chứng rõ ràng
-  * medium — nhiều khả năng là lừa đảo hoặc đánh lừa người dùng
-  * high  — xác nhận phishing, tống tiền, gian lận tài chính, hoặc malware
-- warnings: list[str] — danh sách cảnh báo cụ thể bằng tiếng Việt (rỗng nếu is_safe=true)
+- warnings: list[str] — cảnh báo cụ thể bằng tiếng Việt; PHẢI rỗng nếu is_safe=true
 
-Quy tắc phân loại (áp dụng theo mức độ ưu tiên từ cao xuống thấp):
-1. risk_level=high nếu:
-   - Giả danh cấp trên/CEO/giám đốc yêu cầu chuyển tiền gấp vào tài khoản lạ
-   - Đe dọa, tống tiền, hoặc cưỡng bức dưới bất kỳ hình thức nào
-   - Tên miền giả mạo ngân hàng, ví điện tử, hoặc dịch vụ lớn (vietcombank-xyz.com ≠ vietcombank.com.vn)
-   - Yêu cầu thông tin đăng nhập, OTP, CMND, số tài khoản
-   - Link dẫn đến trang thu thập thông tin (credential harvesting)
-   - Thông báo trúng thưởng kèm yêu cầu nộp phí trước
+Thang phân loại:
+1) high — có MỘT trong các bằng chứng trực tiếp:
+   • Giả danh cấp trên/CEO yêu cầu chuyển tiền gấp vào tài khoản lạ
+   • Đe dọa, tống tiền
+   • Tên miền giả mạo ngân hàng/ví điện tử (vietcombank-xyz.com ≠ vietcombank.com.vn)
+   • Yêu cầu thông tin đăng nhập, OTP, mật khẩu, số thẻ, số tài khoản
+   • Link tới trang thu thập thông tin đăng nhập / thanh toán giả
+   • Trúng thưởng kèm yêu cầu nộp phí trước
 
-2. risk_level=medium nếu:
-   - Tên miền người gửi khác với tổ chức tuyên bố trong nội dung
-   - Lời mời chào hợp đồng/đầu tư từ người lạ với lợi nhuận bất thường
-   - Tạo áp lực thời gian kết hợp với yêu cầu hành động nhạy cảm
-   - Cú pháp URL ẩn (văn bản hiển thị ≠ link thực)
+2) medium — cần ÍT NHẤT HAI tín hiệu đáng ngờ KẾT HỢP (một tín hiệu đơn lẻ KHÔNG đủ):
+   • Tên miền cố tình giả thương hiệu + tạo áp lực thời gian
+   • Mời đầu tư/hợp đồng lợi nhuận bất thường + đòi đặt cọc hoặc cung cấp thông tin
+   • URL ẩn (văn bản hiển thị ≠ link thực) dẫn tới trang đòi thông tin
 
-3. risk_level=low nếu:
-   - Có một số dấu hiệu mơ hồ nhưng không đủ bằng chứng phân loại cao hơn
+3) low (is_safe=false) — có đúng MỘT dấu hiệu mơ hồ, không kèm yêu cầu nhạy cảm,
+   nhưng vẫn nên để người dùng lưu ý.
 
-4. is_safe=true, risk_level=low, warnings=[] nếu:
-   - Email thông thường từ đồng nghiệp, tổ chức đã biết, không yêu cầu hành động nhạy cảm
+4) is_safe=true, risk_level="low", warnings=[] — email hợp lệ thông thường:
+   công việc, tuyển dụng, hóa đơn/thông báo dịch vụ chính thống, mời họp, newsletter…
+   KỂ CẢ khi gửi từ tên miền cá nhân hoặc bên thứ ba, miễn KHÔNG đòi hành động nhạy cảm.
 
-KHÔNG bao gồm markdown fence, giải thích thêm, hoặc text ngoài JSON.
+Nếu email rỗng hoặc không đọc được nội dung: is_safe=true, risk_level="low", warnings=[],
+reasoning="không đủ nội dung để phân tích".
+
+KHÔNG markdown fence, KHÔNG text ngoài JSON.
 
 {few_shot}
 
@@ -214,40 +255,24 @@ class EmailSecurityAgent:
         self._agent = Agent(
             role="Cybersecurity Email Analyst",
             goal=(
-                "Phân tích nội dung email, URL và bối cảnh để phát hiện các dấu hiệu lừa đảo "
-                "(phishing), lừa tiền, tống tiền, hoặc chứa liên kết độc hại. "
-                "Đưa ra phán quyết chính xác, không bỏ sót mối đe dọa thực sự."
+                "Phân tích email để phát hiện lừa đảo, gian lận, tống tiền, liên kết độc hại — "
+                "ĐỒNG THỜI tránh báo động nhầm email hợp lệ. Mục tiêu là PHÁN QUYẾT CHÍNH XÁC "
+                "theo cả hai chiều: không bỏ sót đe dọa thật, không gắn cờ email an toàn."
             ),
             backstory=(
-                "Bạn là chuyên gia an ninh mạng với hơn 10 năm kinh nghiệm điều tra tội phạm "
-                "mạng tại Việt Nam và quốc tế. Bạn cực kỳ nhạy bén với mọi mánh khóe lừa đảo "
-                "qua email: từ CEO Fraud, credential harvesting, advance-fee scam, sextortion "
-                "đến domain spoofing. Bạn hiểu rằng một email 'có vẻ khẩn cấp' từ 'sếp' yêu "
-                "cầu chuyển tiền gấp qua Gmail cá nhân là dấu hiệu đỏ rõ ràng nhất của BEC "
-                "(Business Email Compromise). Bạn không bao giờ bỏ sót mối đe dọa thực sự và "
-                "không phân loại nhầm email an toàn thành nguy hiểm."
+                "Bạn là chuyên gia an ninh email với hơn 10 năm điều tra tội phạm mạng. Bạn nhận ra "
+                "ngay các mánh khóe: CEO Fraud, credential harvesting, advance-fee scam, sextortion, "
+                "giả mạo tên miền thương hiệu. Nhưng bạn cũng hiểu rằng đa số email là hợp lệ: thư "
+                "tuyển dụng từ Gmail, thông báo dịch vụ, hóa đơn nhà cung cấp, mời họp từ đối tác — "
+                "những thứ này KHÔNG phải mối đe dọa dù đến từ tên miền lạ. Một chuyên gia giỏi được "
+                "đánh giá bằng cả độ nhạy (bắt đúng kẻ xấu) lẫn độ chính xác (không vu oan người tốt). "
+                "Bạn chỉ cảnh báo khi có bằng chứng cụ thể về ý định gây hại."
             ),
             llm=self._llm,
             verbose=False,
             allow_delegation=False,
         )
 
-        self._task = Task(
-            description=_SECURITY_TASK_TEMPLATE,
-            expected_output=(
-                "A single JSON object with keys: is_safe (bool), risk_level (low|medium|high), "
-                "warnings (list of strings in Vietnamese). No markdown or extra text."
-            ),
-            agent=self._agent,
-            output_pydantic=SecurityAnalysisOutput,
-        )
-
-        self._crew = Crew(
-            agents=[self._agent],
-            tasks=[self._task],
-            process=Process.sequential,
-            verbose=False,
-        )
 
     async def analyze(
         self,
@@ -267,32 +292,57 @@ class EmailSecurityAgent:
             :class:`SecurityAnalysisOutput` with verdict, risk level, and warnings.
         """
         try:
-            return await asyncio.to_thread(
-                self._analyze_with_crew, email_subject, email_body, sender
-            )
+            return await self._analyze_with_crew(email_subject, email_body, sender)
         except (SecurityParseError, SecurityAgentError, LLMServiceError) as exc:
             logger.warning("CrewAI security analysis failed, using fallback: %s", exc)
+        try:
             return await self._analyze_with_gemini(email_subject, email_body, sender)
+        except Exception as exc:
+            logger.warning(
+                "Gemini security fallback also failed: %s — failing open with unverified status.", exc
+            )
+            return SecurityAnalysisOutput(
+                is_safe=True,
+                risk_level="low",
+                warnings=["Security analysis unavailable — manual review recommended."],
+            )
 
-    def _analyze_with_crew(
+    async def _analyze_with_crew(
         self,
         email_subject: str,
         email_body: str,
         sender: str | None,
     ) -> SecurityAnalysisOutput:
-        """Run the CrewAI workflow synchronously (called from asyncio.to_thread)."""
-        try:
-            result = self._crew.kickoff(
-                inputs={
-                    "few_shot": _FEW_SHOT_EXAMPLES,
-                    "email_subject": email_subject,
-                    "email_body": email_body,
-                    "sender": sender or "unknown",
-                }
+        """Create a fresh Crew per call; run via asyncio.to_thread to avoid executor conflicts."""
+        inputs = {
+            "few_shot": _FEW_SHOT_EXAMPLES,
+            "email_subject": email_subject,
+            "email_body": email_body,
+            "sender": sender or "unknown",
+        }
+
+        def _run() -> Any:
+            task = Task(
+                description=_SECURITY_TASK_TEMPLATE,
+                expected_output=(
+                    "A single JSON object with keys: is_safe (bool), risk_level (low|medium|high), "
+                    "warnings (list of strings in Vietnamese). No markdown or extra text."
+                ),
+                agent=self._agent,
+                output_pydantic=SecurityAnalysisOutput,
             )
+            crew = Crew(
+                agents=[self._agent],
+                tasks=[task],
+                process=Process.sequential,
+                verbose=False,
+            )
+            return crew.kickoff(inputs=inputs)
+
+        try:
+            result = await asyncio.to_thread(_run)
         except Exception as exc:
             raise SecurityAgentError(f"CrewAI kickoff failed: {exc}") from exc
-
         return self._parse_crew_result(result)
 
     async def _analyze_with_gemini(
@@ -313,7 +363,9 @@ class EmailSecurityAgent:
             schema=SecurityAnalysisOutput,
         )
         if not isinstance(result, SecurityAnalysisOutput):
-            return SecurityAnalysisOutput.model_validate(result.model_dump())
+            return SecurityAnalysisOutput.model_validate(
+                self._normalize(result.model_dump())
+            )
         return result
 
     def _parse_crew_result(self, result: Any) -> SecurityAnalysisOutput:
@@ -321,7 +373,10 @@ class EmailSecurityAgent:
         try:
             pydantic_output = getattr(result, "pydantic", None)
             if pydantic_output is not None:
-                return SecurityAnalysisOutput.model_validate(pydantic_output)
+                if isinstance(pydantic_output, SecurityAnalysisOutput):
+                    return pydantic_output
+                raw = pydantic_output.model_dump() if hasattr(pydantic_output, "model_dump") else dict(pydantic_output)
+                return SecurityAnalysisOutput.model_validate(self._normalize(raw))
 
             if isinstance(result, SecurityAnalysisOutput):
                 return result
@@ -330,18 +385,48 @@ class EmailSecurityAgent:
             if tasks_output:
                 last = tasks_output[-1]
                 if getattr(last, "pydantic", None) is not None:
-                    return SecurityAnalysisOutput.model_validate(last.pydantic)
+                    pyd = last.pydantic
+                    if isinstance(pyd, SecurityAnalysisOutput):
+                        return pyd
+                    raw = pyd.model_dump() if hasattr(pyd, "model_dump") else dict(pyd)
+                    return SecurityAnalysisOutput.model_validate(self._normalize(raw))
                 if getattr(last, "json_dict", None):
-                    return SecurityAnalysisOutput.model_validate(last.json_dict)
+                    return SecurityAnalysisOutput.model_validate(
+                        self._normalize(last.json_dict)
+                    )
 
             raw_output = getattr(result, "raw", None) or str(result)
             json_payload = self._extract_json_object(raw_output)
-            return SecurityAnalysisOutput.model_validate(json_payload)
+            return SecurityAnalysisOutput.model_validate(self._normalize(json_payload))
 
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise SecurityParseError(
                 f"Unable to parse CrewAI security output: {exc}"
             ) from exc
+
+    @staticmethod
+    def _normalize(data: dict[str, Any]) -> dict[str, Any]:
+        """Fill missing or invalid fields with safe defaults before Pydantic validation."""
+        result = dict(data)
+
+        is_safe = result.get("is_safe")
+        if not isinstance(is_safe, bool):
+            if isinstance(is_safe, str):
+                result["is_safe"] = is_safe.strip().lower() not in ("false", "0", "no")
+            else:
+                result["is_safe"] = True
+
+        level = result.get("risk_level")
+        result["risk_level"] = level.strip().lower() if isinstance(level, str) and level.strip().lower() in ("low", "medium", "high") else "low"
+
+        warnings = result.get("warnings")
+        if not isinstance(warnings, list):
+            result["warnings"] = [str(warnings)] if isinstance(warnings, str) and warnings.strip() else []
+
+        # Drop the "reasoning" field present in the prompt but not in the schema
+        result.pop("reasoning", None)
+
+        return result
 
     @staticmethod
     def _extract_json_object(raw_text: str) -> dict[str, Any]:

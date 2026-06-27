@@ -1,100 +1,77 @@
-"""FastAPI router for email listing, orchestration, draft updates, and send."""
+"""FastAPI router for email pipeline operations (stateless)."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from datetime import datetime, timezone
-from uuid import UUID
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.api.auth_dependencies import get_current_user
 from backend.api.dependencies import (
+    check_quota,
     get_analysis_agent,
+    get_calendar_service,
     get_classifier_agent,
     get_db,
     get_gmail_service,
     get_response_agent,
+    get_scheduling_agent,
+    get_security_agent,
+    increment_request_count,
 )
 from backend.models.classification import Classification
-from backend.models.draft import Draft
-from backend.models.email import Email
-from backend.models.email_analysis import EmailAnalysis
+from backend.models.email_analysis_cache import EmailAnalysisCache
+from backend.services.calendar_service import CalendarServiceError, GoogleCalendarService
+from backend.core import task_manager
+from backend.core.websocket_manager import manager
 from backend.models.email_scheduling import EmailScheduling
+from backend.models.snoozed_email import SnoozedEmail
 from backend.models.user import User
+from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput
 from backend.schemas.api_schemas import (
-    ClassificationResponse,
-    CreateEventResponse,
-    DraftResponse,
-    DraftSendResponse,
-    DraftUpdateSchema,
-    EmailAnalysisResponse,
-    EmailResponse,
-    PaginatedResponse,
+    AnalyzeEmailRequest,
+    AnalyzeEmailResponse,
+    EventDetailsResponse,
+    GmailEmailItem,
+    GmailListResponse,
     ProcessEmailRequest,
     ProcessEmailResult,
     ProcessEmailsResponse,
-    SchedulingDataResponse,
+    QuickClassifyItem,
+    QuickClassifyResult,
+    ScheduleEventResponse,
 )
 from backend.services.agents import (
     EmailAnalysisAgent,
     EmailClassifierAgent,
     EmailResponseAgent,
+    EmailSchedulingAgent,
+    EmailSecurityAgent,
 )
-from backend.services.calendar_service import (
-    CalendarAPIError,
-    CalendarAuthenticationError,
-    GoogleCalendarService,
-)
-from backend.services.gmail_service import GmailService
+from backend.services.agents.privacy_agent import PrivacyAgent
+from backend.services.gmail_service import GmailAPIError, GmailAuthenticationError, GmailService
 from backend.services.orchestrator import EmailOrchestrator
+
+_privacy = PrivacyAgent()
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/emails", tags=["Emails"])
 
 
-@router.get(
-    "/",
-    response_model=PaginatedResponse[EmailResponse],
-    summary="List processed emails",
-    description="Returns a paginated list of emails for the current user, optionally filtered by category.",
-)
-def list_emails(
-    limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    category: str = Query("all"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> PaginatedResponse[EmailResponse]:
-    """Return paginated emails with their classification, draft, and scheduling data."""
-    stmt = select(Email).where(Email.user_id == current_user.id)
+class ProcessTriggerRequest(BaseModel):
+    """Optional body for /emails/process — carries a client-generated task_id."""
 
-    if category != "all":
-        stmt = stmt.join(Classification, Classification.email_id == Email.id, isouter=True).where(
-            Classification.category == category
-        )
-
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    emails = db.scalars(
-        stmt.order_by(Email.received_at.desc().nulls_last()).offset(offset).limit(limit)
-    ).all()
-
-    items: list[EmailResponse] = []
-    for email in emails:
-        classification = db.scalar(select(Classification).where(Classification.email_id == email.id))
-        draft = db.scalar(select(Draft).where(Draft.email_id == email.id))
-        scheduling = db.scalar(select(EmailScheduling).where(EmailScheduling.email_id == email.id))
-
-        row = EmailResponse.model_validate(email)
-        row.classification = ClassificationResponse.model_validate(classification) if classification else None
-        row.draft = DraftResponse.model_validate(draft) if draft else None
-        row.scheduling = SchedulingDataResponse.model_validate(scheduling) if scheduling else None
-        items.append(row)
-
-    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
+    task_id: str | None = None
 
 
 @router.post(
@@ -103,281 +80,738 @@ def list_emails(
     summary="Fetch and process new emails from Gmail",
     description=(
         "Fetches unread emails from Gmail, classifies them, and creates AI reply drafts. "
-        "Persists all results to the database and returns batch processing statistics."
+        "No email content is persisted to the database."
     ),
 )
 async def batch_process_emails(
-    current_user: User = Depends(get_current_user),
+    payload: ProcessTriggerRequest = Body(default_factory=ProcessTriggerRequest),
+    current_user: User = Depends(check_quota),
     db: Session = Depends(get_db),
     gmail_service: GmailService = Depends(get_gmail_service),
     classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
     response_agent: EmailResponseAgent = Depends(get_response_agent),
 ) -> ProcessEmailsResponse:
     """Trigger a Gmail fetch + classify + draft batch run for the logged-in user."""
-    orchestrator = EmailOrchestrator(
-        db=db,
-        gmail_service=gmail_service,
-        classifier_agent=classifier_agent,
-        response_agent=response_agent,
-        user_id=current_user.id,
-    )
-    summary = await orchestrator.process_new_emails(limit=20)
-    return ProcessEmailsResponse(**{k: summary[k] for k in ProcessEmailsResponse.model_fields if k in summary})
+    task_id = payload.task_id or str(uuid.uuid4())
+    task_manager.register_task(task_id, str(current_user.id))
+    try:
+        orchestrator = EmailOrchestrator(
+            db=db,
+            gmail_service=gmail_service,
+            classifier_agent=classifier_agent,
+            response_agent=response_agent,
+            user_id=current_user.id,
+            task_id=task_id,
+        )
+        summary = await orchestrator.process_new_emails(limit=20)
+        increment_request_count(current_user, db)
+        return ProcessEmailsResponse(**{k: summary[k] for k in ProcessEmailsResponse.model_fields if k in summary})
+    except asyncio.CancelledError:
+        raise HTTPException(status_code=499, detail="Processing was cancelled by the user.")
+    finally:
+        task_manager.remove_task(task_id)
 
 
 @router.get(
-    "/{email_id}/analysis",
-    response_model=EmailAnalysisResponse,
-    summary="Get or generate AI analysis for an email",
-    description=(
-        "Returns cached deep-analysis (language, summary, translation, action items, sentiment). "
-        "If no cached result exists, runs the analysis agent and persists the result."
-    ),
+    "/list",
+    response_model=GmailListResponse,
+    summary="Fetch inbox emails from Gmail (no DB persistence)",
+    description="Fetches one page of emails from Gmail. Pass nextPageToken as page_token to load subsequent pages.",
 )
-async def get_email_analysis(
-    email_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    analysis_agent: EmailAnalysisAgent = Depends(get_analysis_agent),
-) -> EmailAnalysisResponse:
-    """Return cached analysis or run the agent and cache the result."""
-    email = db.scalar(
-        select(Email).where(Email.id == email_id, Email.user_id == current_user.id)
-    )
-    if email is None:
-        raise HTTPException(status_code=404, detail="Email not found.")
-
-    cached = db.scalar(select(EmailAnalysis).where(EmailAnalysis.email_id == email_id))
-    if cached is not None:
-        return EmailAnalysisResponse.model_validate(cached)
-
+async def list_emails(
+    limit: int = 20,
+    query: str = "in:inbox -category:promotions",
+    page_token: str | None = None,
+    gmail_service: GmailService = Depends(get_gmail_service),
+    _: User = Depends(get_current_user),
+) -> GmailListResponse:
+    """Return one page of Gmail inbox emails without any DB persistence."""
     try:
-        output = await analysis_agent.analyze(
-            email_subject=email.subject or "",
-            email_body=email.body or "",
-            email_sender=email.sender,
+        emails, next_page_token = await gmail_service.fetch_emails(
+            query=query, limit=limit, page_token=page_token
         )
-    except Exception as exc:
-        logger.exception("Analysis agent failed for email %s: %s", email_id, exc)
-        raise HTTPException(status_code=502, detail=f"Analysis failed: {exc}") from exc
+        return GmailListResponse(emails=emails, next_page_token=next_page_token)
+    except GmailAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except GmailAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    record = EmailAnalysis(
-        email_id=email_id,
-        detected_language=output.detected_language,
-        summary=output.summary,
-        translation=output.translation,
-        action_items=output.action_items,
-        sentiment=output.sentiment,
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
 
-    return EmailAnalysisResponse.model_validate(record)
+@router.post(
+    "/cleanup-spam",
+    summary="Move all Gmail SPAM folder messages to trash",
+)
+async def cleanup_spam(
+    gmail_service: GmailService = Depends(get_gmail_service),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Move every message in the Gmail SPAM folder to trash for the logged-in user."""
+    try:
+        result = await gmail_service.cleanup_spam_folder()
+    except GmailAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except GmailAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "message": f"Spam cleanup complete. Moved {result['trashed']} message(s) to trash.",
+        "trashed": result["trashed"],
+        "errors": result["errors"],
+    }
 
 
 @router.post(
     "/classify",
     response_model=ProcessEmailResult,
-    summary="Classify a single email (stateless test)",
+    summary="Classify a single email (stateless)",
     description=(
-        "Accepts raw email text, runs classification and optional reply drafting "
-        "without DB persistence. Useful for testing the AI pipeline directly."
+        "Accepts raw email text, runs classification and optional reply drafting. "
+        "Email content is not persisted; AuditLog entries are written for observability."
     ),
 )
 async def classify_email(
     payload: ProcessEmailRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(check_quota),
     db: Session = Depends(get_db),
     classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
     response_agent: EmailResponseAgent = Depends(get_response_agent),
 ) -> ProcessEmailResult:
-    """Classify raw email text and optionally draft a reply; no data is written to the database."""
-    raw_email = {
-        "subject": payload.subject,
-        "body": payload.text,
-        "sender": payload.sender,
-    }
-
-    orchestrator = EmailOrchestrator(
-        db=db,
-        gmail_service=None,
-        classifier_agent=classifier_agent,
-        response_agent=response_agent,
-        user_id=current_user.id,
-    )
-
-    result = await orchestrator.process_one_stateless(raw_email)
-    return ProcessEmailResult.model_validate(result)
-
-
-@router.put(
-    "/{email_id}/draft",
-    response_model=DraftResponse,
-    summary="Update draft content",
-    description="Updates the stored reply draft body for the given email id (manual edit).",
-)
-def update_draft(
-    email_id: UUID,
-    payload: DraftUpdateSchema,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> DraftResponse:
-    """Replace ``draft_content`` on the draft linked to ``email_id`` and mark as modified."""
-    draft = db.scalar(select(Draft).where(Draft.email_id == email_id))
-    if draft is None:
-        raise HTTPException(status_code=404, detail="No draft exists for this email.")
-
-    draft.draft_content = payload.draft_content
-    draft.is_modified = True
-    db.commit()
-    db.refresh(draft)
-
-    return DraftResponse.model_validate(draft)
-
-
-@router.post(
-    "/{email_id}/send",
-    response_model=DraftSendResponse,
-    summary="Send Gmail draft",
-    description="Sends the Gmail draft identified by ``draft_gmail_id`` on the stored draft row.",
-)
-async def send_draft(
-    email_id: UUID,
-    db: Session = Depends(get_db),
-    gmail_service: GmailService = Depends(get_gmail_service),
-    current_user: User = Depends(get_current_user),
-) -> DraftSendResponse:
-    """Send the reply draft through Gmail and mark the local draft as sent."""
-    draft = db.scalar(select(Draft).where(Draft.email_id == email_id))
-    if draft is None:
-        raise HTTPException(status_code=404, detail="No draft exists for this email.")
-
-    if not draft.draft_gmail_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Draft has no Gmail draft id; create a draft via the orchestrator first.",
+    """Classify raw email text and optionally draft a reply; email content is not persisted."""
+    if payload.gmail_message_id and not payload.generate_draft:
+        cached = db.scalar(
+            select(Classification).where(
+                Classification.gmail_message_id == payload.gmail_message_id,
+                Classification.user_id == current_user.id,
+            )
         )
+        if cached:
+            logger.info("classify cache hit (single): gmail_message_id=%s", payload.gmail_message_id)
+            return ProcessEmailResult(
+                category=cached.category or "unknown",
+                priority_score=cached.priority_score or 0,
+                summary=cached.summary or "",
+                confidence=cached.confidence or 0.0,
+            )
 
+    task_id = payload.task_id or str(uuid.uuid4())
+    task_manager.register_task(task_id, str(current_user.id))
     try:
-        sent = await gmail_service.send_draft(draft.draft_gmail_id)
-    except Exception as exc:
-        logger.exception("Gmail send failed for email %s: %s", email_id, exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    draft.is_sent = True
-    draft.sent_at = datetime.now(timezone.utc)
-    db.commit()
-
-    return DraftSendResponse(
-        message="Draft sent successfully.",
-        gmail_message_id=sent.get("id"),
-        gmail_thread_id=sent.get("threadId"),
-    )
-
-
-@router.post(
-    "/{email_id}/create-event",
-    response_model=CreateEventResponse,
-    summary="Create Google Calendar event from scheduling data",
-    description=(
-        "Creates a Google Calendar event with a Google Meet link from stored scheduling data, "
-        "then sends the reply draft if one exists."
-    ),
-)
-async def create_calendar_event(
-    email_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    gmail_service: GmailService = Depends(get_gmail_service),
-) -> CreateEventResponse:
-    """Create a Calendar event using the scheduling data stored for the email."""
-    scheduling = db.scalar(
-        select(EmailScheduling).where(EmailScheduling.email_id == email_id)
-    )
-    if scheduling is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No scheduling data found. Call POST /schedule first.",
+        raw_email = {
+            "subject": payload.subject,
+            "body": payload.text,
+            "sender": payload.sender,
+        }
+        orchestrator = EmailOrchestrator(
+            db=db,
+            gmail_service=None,
+            classifier_agent=classifier_agent,
+            response_agent=response_agent,
+            user_id=current_user.id,
+            task_id=task_id,
         )
-    if not scheduling.is_meeting_request:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This email was not classified as a meeting request.",
-        )
-    if not scheduling.start_datetime or not scheduling.end_datetime:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Scheduling data is missing exact datetimes. "
-                "The AI could not extract a specific time — ask the sender for clarification."
-            ),
-        )
+        result = await orchestrator.process_one_stateless(raw_email, tone_override=payload.tone, force_draft=payload.generate_draft)
+        increment_request_count(current_user, db)
 
-    try:
-        cal_service = GoogleCalendarService(credentials=gmail_service.credentials)
-    except CalendarAuthenticationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Calendar authentication failed: {exc}",
-        ) from exc
-
-    try:
-        is_available = await cal_service.check_availability(
-            scheduling.start_datetime, scheduling.end_datetime
-        )
-    except CalendarAPIError as exc:
-        logger.warning("Freebusy check failed for email %s, proceeding anyway: %s", email_id, exc)
-        is_available = True
-
-    try:
-        event = await cal_service.create_event(
-            summary=scheduling.event_summary or "Meeting",
-            start_time=scheduling.start_datetime,
-            end_time=scheduling.end_datetime,
-            attendees=[],
-            description=scheduling.suggested_reply or "",
-        )
-    except CalendarAPIError as exc:
-        logger.exception("Calendar event creation failed for email %s: %s", email_id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Google Calendar error: {exc}",
-        ) from exc
-
-    scheduling.calendar_event_id = event.get("event_id")
-    scheduling.calendar_html_link = event.get("html_link")
-    scheduling.meet_link = event.get("meet_link")
-    scheduling.event_created_at = datetime.now(timezone.utc)
-    db.commit()
-
-    draft = db.scalar(select(Draft).where(Draft.email_id == email_id))
-    if draft and not draft.is_sent:
-        meet_url = event.get("meet_link") or event.get("html_link") or ""
-        draft.draft_content = (draft.draft_content or "").replace("{{meet_link}}", meet_url)
-
-        if draft.draft_gmail_id:
-            try:
-                await gmail_service.send_draft(draft.draft_gmail_id)
-                draft.is_sent = True
-                draft.sent_at = datetime.now(timezone.utc)
-                db.commit()
-                logger.info("Draft sent for email %s after calendar event creation.", email_id)
-            except Exception as exc:
-                logger.warning(
-                    "Draft send failed after event creation for email %s: %s", email_id, exc
+        if payload.gmail_message_id:
+            existing = db.scalar(
+                select(Classification).where(
+                    Classification.gmail_message_id == payload.gmail_message_id,
+                    Classification.user_id == current_user.id,
                 )
-        else:
+            )
+            if existing:
+                existing.category = result["category"]
+                existing.priority_score = result["priority_score"]
+                existing.summary = result["summary"]
+                existing.confidence = result["confidence"]
+            else:
+                db.add(Classification(
+                    user_id=current_user.id,
+                    gmail_message_id=payload.gmail_message_id,
+                    category=result["category"],
+                    priority_score=result["priority_score"],
+                    summary=result["summary"],
+                    confidence=result["confidence"],
+                ))
             db.commit()
 
-    return CreateEventResponse(
-        message=(
-            "Calendar event created successfully."
-            if is_available
-            else "Calendar event created (time conflict detected — you may have a scheduling overlap)."
+        return ProcessEmailResult.model_validate(result)
+    except asyncio.CancelledError:
+        raise HTTPException(status_code=499, detail="Classification was cancelled by the user.")
+    finally:
+        task_manager.remove_task(task_id)
+
+
+class CreateGmailDraftRequest(BaseModel):
+    """Payload for pushing a draft reply into Gmail."""
+
+    to: str
+    subject: str
+    body: str
+    thread_id: str | None = None
+
+
+@router.post("/gmail-draft", summary="Create a Gmail draft reply")
+async def create_gmail_draft(
+    payload: CreateGmailDraftRequest,
+    gmail_service: GmailService = Depends(get_gmail_service),
+    _user: User = Depends(get_current_user),
+) -> dict:
+    """Push a draft reply into the authenticated user's Gmail Drafts folder."""
+    try:
+        draft_id = await gmail_service.create_draft(
+            to=payload.to,
+            subject=payload.subject,
+            body=payload.body,
+            thread_id=payload.thread_id,
+        )
+    except GmailAuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except GmailAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"draft_id": draft_id}
+
+
+_CLEANABLE_CATEGORIES = {EmailCategory.SPAM, EmailCategory.NEWSLETTER}
+_CLEANUP_CONFIDENCE_THRESHOLD = 0.7
+_CLEANUP_INBOX_QUERY = "in:inbox category:promotions OR in:inbox category:social OR in:inbox category:updates"
+
+
+class CleanupInboxRequest(BaseModel):
+    """Optional body for /emails/cleanup-inbox."""
+
+    task_id: str | None = None
+    limit: int = 50
+
+
+@router.post(
+    "/cleanup-inbox",
+    summary="AI-classify inbox emails and trash spam/newsletter ones",
+    description=(
+        "Fetches inbox emails from Promotions, Social, and Updates categories, "
+        "runs AI classification, and moves messages classified as spam or newsletter "
+        f"with confidence ≥ {_CLEANUP_CONFIDENCE_THRESHOLD} to trash."
+    ),
+)
+async def cleanup_inbox(
+    payload: CleanupInboxRequest = Body(default_factory=CleanupInboxRequest),
+    current_user: User = Depends(check_quota),
+    db: Session = Depends(get_db),
+    gmail_service: GmailService = Depends(get_gmail_service),
+    classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
+) -> dict:
+    """Fetch inbox emails, classify with AI, and trash spam/newsletter messages."""
+    task_id = payload.task_id or str(uuid.uuid4())
+    task_manager.register_task(task_id, str(current_user.id))
+    try:
+        try:
+            emails, _ = await gmail_service.fetch_emails(query=_CLEANUP_INBOX_QUERY, limit=payload.limit)
+        except GmailAuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except GmailAPIError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        scanned = len(emails)
+        trashed = 0
+        skipped = 0
+        errors = 0
+
+        for email in emails:
+            if task_manager.is_cancelled(task_id):
+                raise asyncio.CancelledError("Task was aborted by user")
+
+            message_id = email.get("gmail_message_id", "")
+            try:
+                cached_cls = (
+                    db.scalar(
+                        select(Classification).where(
+                            Classification.gmail_message_id == message_id,
+                            Classification.user_id == current_user.id,
+                        )
+                    )
+                    if message_id else None
+                )
+                if cached_cls:
+                    logger.info("classify cache hit (cleanup): gmail_message_id=%s", message_id)
+                    try:
+                        _cat = EmailCategory(cached_cls.category)
+                    except (ValueError, TypeError):
+                        _cat = EmailCategory.NEWSLETTER
+                    classification = EmailClassificationOutput.model_construct(
+                        category=_cat,
+                        priority_score=cached_cls.priority_score or 0,
+                        summary=cached_cls.summary or "",
+                        deadline=None,
+                        confidence=cached_cls.confidence or 0.0,
+                    )
+                else:
+                    classification = await classifier_agent.classify(
+                        subject=email.get("subject") or "",
+                        body=email.get("body") or email.get("snippet") or "",
+                        sender=email.get("sender"),
+                    )
+                    if message_id:
+                        try:
+                            db.add(Classification(
+                                user_id=current_user.id,
+                                gmail_message_id=message_id,
+                                thread_id=email.get("thread_id") or None,
+                                category=classification.category.value,
+                                priority_score=classification.priority_score,
+                                summary=classification.summary,
+                                confidence=classification.confidence,
+                            ))
+                            db.commit()
+                        except IntegrityError:
+                            # Row already exists (inserted by another path/user); reuse classification result.
+                            db.rollback()
+
+                if task_manager.is_cancelled(task_id):
+                    raise asyncio.CancelledError("Task was aborted by user")
+
+                if (
+                    classification.category in _CLEANABLE_CATEGORIES
+                    and classification.confidence >= _CLEANUP_CONFIDENCE_THRESHOLD
+                ):
+                    await gmail_service.trash_message(message_id)
+                    trashed += 1
+                else:
+                    skipped += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Failed to process message %s during inbox cleanup: %s", message_id, exc)
+                db.rollback()
+                errors += 1
+
+        increment_request_count(current_user, db)
+        return {
+            "message": f"Dọn dẹp xong. Đã xóa {trashed}/{scanned} email spam/quảng cáo.",
+            "scanned": scanned,
+            "trashed": trashed,
+            "skipped": skipped,
+            "errors": errors,
+        }
+    except asyncio.CancelledError:
+        raise HTTPException(status_code=499, detail="Cleanup was cancelled by the user.")
+    finally:
+        task_manager.remove_task(task_id)
+
+
+@router.post(
+    "/analyze",
+    response_model=AnalyzeEmailResponse,
+    summary="AI analysis of a single email (stateless + optional event persistence)",
+    description=(
+        "Runs AnalysisAgent (summary, sentiment, action items) and SchedulingAgent "
+        "(meeting detection) in parallel. If a scheduling intent is detected, the "
+        "structured event metadata is persisted to ``email_schedulings`` and a "
+        "real-time WebSocket event is broadcast. Raw email body is never stored."
+    ),
+)
+async def analyze_email(
+    payload: AnalyzeEmailRequest,
+    current_user: User = Depends(check_quota),
+    db: Session = Depends(get_db),
+    analysis_agent: EmailAnalysisAgent = Depends(get_analysis_agent),
+    scheduling_agent: EmailSchedulingAgent = Depends(get_scheduling_agent),
+    security_agent: EmailSecurityAgent = Depends(get_security_agent),
+) -> AnalyzeEmailResponse:
+    """Deep-analyze an email and optionally persist a detected calendar event."""
+    if payload.gmail_message_id:
+        cached = db.scalar(
+            select(EmailAnalysisCache).where(
+                EmailAnalysisCache.gmail_message_id == payload.gmail_message_id,
+                EmailAnalysisCache.user_id == current_user.id,
+            )
+        )
+        if cached:
+            logger.info("analyze cache hit: gmail_message_id=%s", payload.gmail_message_id)
+            return AnalyzeEmailResponse.model_validate_json(cached.response_json)
+
+    masked_subject = _privacy.mask(payload.subject)
+    masked_body = _privacy.mask(payload.body)
+    # mask() strips email addresses from the sender display name (e.g. "Name <a@b.com>")
+    # but SecurityAgent receives the real sender so it can detect domain spoofing —
+    # comparing the From header domain against the email body links requires the raw value.
+    masked_sender = _privacy.mask(payload.sender or "")
+
+    _gather_results = await asyncio.gather(
+        analysis_agent.analyze(
+            email_subject=masked_subject,
+            email_body=masked_body,
+            email_sender=masked_sender,
         ),
-        event_id=event.get("event_id"),
-        html_link=event.get("html_link"),
-        meet_link=event.get("meet_link"),
-        is_available=is_available,
+        scheduling_agent.extract_schedule(
+            email_subject=masked_subject,
+            email_body=masked_body,
+            sender=masked_sender,
+        ),
+        security_agent.analyze(
+            email_subject=masked_subject,
+            email_body=masked_body,
+            sender=payload.sender or "",  # real sender — needed for spoofing domain check
+        ),
+        return_exceptions=True,
     )
+    analysis_result, scheduling_result, security_result = _gather_results
+    if isinstance(scheduling_result, BaseException):
+        scheduling_result = SchedulingOutput(is_meeting_request=False, suggested_reply="")
+    if isinstance(analysis_result, BaseException):
+        raise analysis_result
+    if isinstance(security_result, BaseException):
+        raise security_result
+
+    has_event = scheduling_result.is_meeting_request and scheduling_result.action is not None
+    event_details: EventDetailsResponse | None = None
+    scheduling_id: str | None = None
+
+    if has_event:
+        action = scheduling_result.action
+        # action.start_time / action.end_time are timezone-aware datetime objects
+        # validated by Pydantic — guaranteed ISO-8601 compliant on serialisation.
+        start_iso = action.start_time.isoformat()
+        end_iso = action.end_time.isoformat()
+
+        event_details = EventDetailsResponse(
+            event_title=scheduling_result.event_summary,
+            start_time=start_iso,
+            end_time=end_iso,
+            attendees=action.attendees,
+        )
+
+        row: EmailScheduling | None = None
+        if payload.gmail_message_id:
+            row = db.scalar(
+                select(EmailScheduling).where(
+                    EmailScheduling.user_id == current_user.id,
+                    EmailScheduling.gmail_message_id == payload.gmail_message_id,
+                )
+            )
+        if row is None:
+            row = EmailScheduling(
+                user_id=current_user.id,
+                gmail_message_id=payload.gmail_message_id,
+                event_title=scheduling_result.event_summary,
+                start_datetime=action.start_time,
+                end_datetime=action.end_time,
+                attendees_json=json.dumps(action.attendees),
+                suggested_reply=scheduling_result.suggested_reply or None,
+                status="PENDING",
+            )
+            db.add(row)
+        else:
+            row.event_title = scheduling_result.event_summary
+            row.start_datetime = action.start_time
+            row.end_datetime = action.end_time
+            row.attendees_json = json.dumps(action.attendees)
+            row.suggested_reply = scheduling_result.suggested_reply or None
+        db.commit()
+        db.refresh(row)
+        scheduling_id = str(row.id)
+
+        await manager.broadcast(
+            {
+                "type": "NEW_CALENDAR_EVENT",
+                "event_title": scheduling_result.event_summary,
+                "start_time": start_iso,
+                "scheduling_id": scheduling_id,
+            },
+            target_user_id=current_user.id,
+        )
+
+    if security_result.risk_level == "high":
+        await manager.broadcast(
+            {
+                "type": "SECURITY_ALERT",
+                "risk_level": "high",
+                "warnings": security_result.warnings,
+                "sender": payload.sender,
+                "subject": payload.subject,
+            },
+            target_user_id=current_user.id,
+        )
+
+    increment_request_count(current_user, db)
+    response = AnalyzeEmailResponse(
+        summary=analysis_result.summary,
+        sentiment=analysis_result.sentiment,
+        action_items=analysis_result.action_items,
+        translation=analysis_result.translation,
+        detected_language=analysis_result.detected_language,
+        has_event=has_event,
+        event_details=event_details,
+        scheduling_id=scheduling_id,
+        is_safe=security_result.is_safe,
+        risk_level=security_result.risk_level,
+        warnings=security_result.warnings,
+    )
+    if payload.gmail_message_id:
+        existing_cache = db.scalar(
+            select(EmailAnalysisCache).where(
+                EmailAnalysisCache.gmail_message_id == payload.gmail_message_id,
+                EmailAnalysisCache.user_id == current_user.id,
+            )
+        )
+        if existing_cache:
+            existing_cache.response_json = response.model_dump_json()
+        else:
+            db.add(EmailAnalysisCache(
+                user_id=current_user.id,
+                gmail_message_id=payload.gmail_message_id,
+                response_json=response.model_dump_json(),
+            ))
+        db.commit()
+    return response
+
+
+@router.get(
+    "/scheduled-events",
+    response_model=list[ScheduleEventResponse],
+    summary="List persisted calendar events extracted from emails",
+    description="Returns all rows from ``email_schedulings``, newest first.",
+)
+def list_scheduled_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ScheduleEventResponse]:
+    """Return all saved scheduling events ordered by creation time descending."""
+    rows = db.scalars(
+        select(EmailScheduling)
+        .where(EmailScheduling.user_id == current_user.id)
+        .order_by(EmailScheduling.created_at.desc())
+    ).all()
+    return [
+        ScheduleEventResponse(
+            id=str(row.id),
+            title=row.event_title or "(Không có tiêu đề)",
+            startTime=row.start_datetime.astimezone(timezone(timedelta(hours=7))).isoformat() if row.start_datetime else "",
+            endTime=row.end_datetime.astimezone(timezone(timedelta(hours=7))).isoformat() if row.end_datetime else "",
+            attendees=row.attendees,
+            status=row.status,
+            emailSnippet=row.event_title or "",
+            alternativeSlots=[],
+            html_link=row.google_calendar_html_link,
+            meet_link=row.google_meet_link,
+            is_synced=bool(row.google_calendar_event_id),
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/scheduled-events/{scheduling_id}/confirm",
+    summary="Confirm a pending calendar event and sync to Google Calendar",
+    description=(
+        "Creates a Google Calendar event, persists the event ID and links, "
+        "then marks the row as CONFIRMED. If Calendar API fails the DB is not mutated."
+    ),
+)
+async def confirm_scheduled_event(
+    scheduling_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    calendar_service: GoogleCalendarService = Depends(get_calendar_service),
+) -> dict:
+    """Create a Calendar event then mark the scheduling row as CONFIRMED."""
+    row = db.get(EmailScheduling, scheduling_id)
+    if row is None or row.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+    if row.status == "CONFIRMED":
+        return {
+            "message": "Event already confirmed.",
+            "id": str(row.id),
+            "html_link": row.google_calendar_html_link,
+            "meet_link": row.google_meet_link,
+        }
+
+    start_iso = row.start_datetime.isoformat() if row.start_datetime else None
+    end_iso = row.end_datetime.isoformat() if row.end_datetime else None
+    if not start_iso or not end_iso:
+        raise HTTPException(status_code=400, detail="Event is missing start or end time.")
+
+    _email_re = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+    valid_attendees = [a for a in row.attendees if _email_re.match(a)]
+
+    try:
+        result = await calendar_service.create_event(
+            summary=row.event_title or "(No title)",
+            start_time=start_iso,
+            end_time=end_iso,
+            attendees=valid_attendees or None,
+            description=row.suggested_reply or None,
+        )
+    except CalendarServiceError as exc:
+        raise HTTPException(status_code=502, detail=f"Google Calendar error: {exc}") from exc
+
+    row.google_calendar_event_id = result.get("event_id")
+    row.google_calendar_html_link = result.get("html_link")
+    row.google_meet_link = result.get("meet_link")
+    row.status = "CONFIRMED"
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return {
+        "message": "Event confirmed.",
+        "id": str(row.id),
+        "html_link": row.google_calendar_html_link,
+        "meet_link": row.google_meet_link,
+    }
+
+
+@router.delete(
+    "/scheduled-events/{scheduling_id}/cancel",
+    summary="Cancel a confirmed calendar event",
+    description="Deletes the event from Google Calendar (if synced) and marks the row as CANCELLED.",
+)
+async def cancel_scheduled_event(
+    scheduling_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    calendar_service: GoogleCalendarService = Depends(get_calendar_service),
+) -> dict:
+    """Delete the Google Calendar event (if present) and mark the row CANCELLED."""
+    row = db.get(EmailScheduling, scheduling_id)
+    if row is None or row.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+
+    if row.google_calendar_event_id:
+        try:
+            await calendar_service.delete_event(row.google_calendar_event_id)
+        except CalendarServiceError as exc:
+            raise HTTPException(status_code=500, detail=f"Google Calendar error: {exc}") from exc
+
+    row.status = "CANCELLED"
+    row.google_calendar_event_id = None
+    row.google_calendar_html_link = None
+    row.google_meet_link = None
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return {"message": "Event cancelled.", "id": str(row.id)}
+
+
+class SnoozeEmailRequest(BaseModel):
+    gmail_message_id: str
+    thread_id: str | None = None
+    subject: str | None = None
+    sender: str | None = None
+    snooze_until: datetime
+
+
+@router.post(
+    "/snooze",
+    summary="Snooze an email until a given time",
+    description=(
+        "Persists a snooze record and schedules a one-shot APScheduler job that "
+        "broadcasts a ``SNOOZED_EMAIL_DUE`` WebSocket event when the time expires."
+    ),
+)
+async def snooze_email(
+    payload: SnoozeEmailRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    from backend.core.scheduler import schedule_snooze
+
+    if payload.snooze_until <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="snooze_until must be in the future.")
+
+    row = SnoozedEmail(
+        user_id=current_user.id,
+        gmail_message_id=payload.gmail_message_id,
+        thread_id=payload.thread_id,
+        subject=payload.subject,
+        sender=payload.sender,
+        snooze_until=payload.snooze_until,
+        status="PENDING",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    schedule_snooze(str(row.id), row.snooze_until)
+
+    return {
+        "snooze_id": str(row.id),
+        "snooze_until": row.snooze_until.isoformat(),
+        "message": "Email snoozed successfully.",
+    }
+
+
+@router.post(
+    "/classify-quick",
+    response_model=list[QuickClassifyResult],
+    summary="Batch classify email threads (lightweight)",
+    description=(
+        "Classifies a batch of threads using only subject/snippet. "
+        "Results are cached in DB by thread_id — repeat calls return instantly without LLM calls."
+    ),
+)
+async def classify_quick(
+    items: list[QuickClassifyItem],
+    current_user: User = Depends(get_current_user),
+    classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
+    db: Session = Depends(get_db),
+) -> list[QuickClassifyResult]:
+    """Return cached classifications where available; classify and cache only misses."""
+    if not items:
+        return []
+
+    valid_items = [item for item in items if item.thread_id]
+    if not valid_items:
+        return []
+
+    thread_ids = [item.thread_id for item in valid_items]
+    cached_rows = db.scalars(
+        select(Classification).where(
+            Classification.thread_id.in_(thread_ids),
+            Classification.user_id == current_user.id,
+        )
+    ).all()
+    # Multiple rows may share a thread_id (from per-message orchestrator runs); keep the most recent per thread.
+    cache: dict[str, Classification] = {}
+    for row in cached_rows:
+        if row.thread_id and row.thread_id not in cache:
+            cache[row.thread_id] = row
+
+    misses = [item for item in valid_items if item.thread_id not in cache]
+    if misses:
+        new_results = await asyncio.gather(
+            *(
+                classifier_agent.classify(
+                    subject=_privacy.mask(item.subject),
+                    body=_privacy.mask(item.snippet or ""),
+                    sender=item.sender or "",
+                )
+                for item in misses
+            )
+        )
+        for item, result in zip(misses, new_results):
+            existing = cache.get(item.thread_id)
+            if existing:
+                existing.category = result.category.value
+                existing.priority_score = result.priority_score
+                existing.confidence = result.confidence
+            else:
+                row = Classification(
+                    user_id=current_user.id,
+                    thread_id=item.thread_id,
+                    category=result.category.value,
+                    priority_score=result.priority_score,
+                    confidence=result.confidence,
+                )
+                db.add(row)
+                cache[item.thread_id] = row
+        db.commit()
+
+    return [
+        QuickClassifyResult(
+            thread_id=item.thread_id,
+            category=cache[item.thread_id].category or "unknown",
+            priority_score=cache[item.thread_id].priority_score or 0,
+            confidence=cache[item.thread_id].confidence or 0.0,
+        )
+        for item in valid_items
+        if item.thread_id in cache
+    ]

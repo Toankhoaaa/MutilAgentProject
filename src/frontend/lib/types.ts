@@ -3,6 +3,14 @@ export interface UserProfile {
   email: string;
   display_name: string | null;
   is_active: boolean;
+  is_admin: boolean;
+}
+
+export interface AdminUserStats {
+  total: number;
+  active: number;
+  suspended: number;
+  premium: number;
 }
 
 export interface Classification {
@@ -48,6 +56,9 @@ export interface Email {
   classification: Classification | null;
   draft: Draft | null;
   scheduling: SchedulingData | null;
+  is_safe?: boolean;
+  security_risk_level?: string | null;
+  security_warnings?: string[];
 }
 
 export interface PaginatedResponse<T> {
@@ -93,6 +104,63 @@ export interface AgentStatus {
   message: string | null;
 }
 
+export interface GmailEmailItem {
+  gmail_message_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  sender: string | null;
+  date: string | null;
+  snippet: string | null;
+}
+
+export interface GmailListResponse {
+  emails: GmailEmailItem[];
+  next_page_token: string | null;
+}
+
+export interface EventDetails {
+  event_title: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  attendees: string[];
+}
+
+export interface AnalyzeEmailResponse {
+  summary: string[];
+  sentiment: string;
+  action_items: string[];
+  translation: string | null;
+  detected_language: string;
+  has_event: boolean;
+  event_details: EventDetails | null;
+  scheduling_id: string | null;
+  is_safe: boolean;
+  risk_level: "low" | "medium" | "high";
+  warnings: string[];
+}
+
+export interface InboxEmailState extends GmailEmailItem {
+  analysis: AnalyzeEmailResponse | null;
+  isAnalyzing: boolean;
+  category: string | null;
+  priority_score: number | null;
+}
+
+export interface ProcessedEmailDetail {
+  gmail_message_id: string;
+  subject: string | null;
+  sender: string | null;
+  category: string;
+  priority_score: number;
+  summary: string;
+  confidence: number;
+  draft_subject: string | null;
+  has_draft: boolean;
+  is_safe?: boolean;
+  security_risk_level?: string | null;
+  security_warnings?: string[];
+}
+
 export interface ProcessEmailsResult {
   fetched: number;
   processed: number;
@@ -104,6 +172,7 @@ export interface ProcessEmailsResult {
   llm_total_time_ms: number;
   total_time_ms: number;
   errors: Record<string, unknown>[];
+  processed_emails: ProcessedEmailDetail[];
 }
 
 export interface SchedulerStatus {
@@ -147,4 +216,176 @@ export interface EmailAnalysisResult {
   sentiment: "Positive" | "Neutral" | "Negative";
   created_at: string;
   updated_at: string;
+}
+
+export interface AuditLogEntry {
+  id: number;
+  user_id: string | null;
+  email_id: string | null;
+  agent_name: string | null;
+  action: string | null;
+  status: string | null;
+  details: Record<string, unknown> | unknown[] | null;
+  ip_address: string | null;
+  created_at: string;
+}
+
+export interface UserActivityResponse {
+  emails_processed: number;
+  drafts_created: number;
+  last_active_at: string | null;
+  recent_logs: AuditLogEntry[];
+}
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  display_name: string | null;
+  is_active: boolean;
+  is_admin: boolean;
+  subscription_tier: string;
+  max_requests: number;
+  request_count: number;
+  status: string;
+  tier_expires_at: string | null;
+  created_at: string;
+}
+
+export interface AdminUserListResponse {
+  items: AdminUser[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface ScheduleEvent {
+  id: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  attendees: string[];
+  status: 'PENDING' | 'CONFIRMED' | 'CONFLICT' | 'CANCELLED';
+  emailSnippet: string;
+  alternativeSlots: string[];
+  html_link?: string | null;
+  meet_link?: string | null;
+  is_synced?: boolean;
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  user_id: string;
+  filename: string;
+  source_email: string | null;
+  ai_summary: string | null;
+  notes: string | null;
+  chroma_collection_id: string | null;
+  chunk_count: number | null;
+  status: 'processing' | 'ready' | 'failed';
+  upload_date: string;
+}
+
+export interface KnowledgeListResponse {
+  items: KnowledgeDocument[];
+  total: number;
+}
+
+export interface Task {
+  id: string;
+  user_id: string;
+  title: string;
+  description: string | null;
+  status: "suggested" | "todo" | "in_progress" | "done" | "dismissed";
+  priority: number;
+  deadline: string | null;
+  remind_at: string | null;
+  source: "manual" | "ai_email" | "delegation";
+  source_email_id: string | null;
+  source_thread_id: string | null;
+  department: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface DelegationItem {
+  id: string;
+  delegation_id: string;
+  department_name: string | null;
+  department_id: string | null;
+  recipient_email: string | null;
+  work_items: string[];
+  draft_subject: string | null;
+  draft_body: string | null;
+  gmail_draft_id: string | null;
+  cc_emails: string | null;
+  bcc_emails: string | null;
+  confidence: number | null;
+  reason: string | null;
+  status: "draft" | "sent" | "dismissed";
+  sent_at: string | null;
+  already_sent_warning: boolean;
+}
+
+export interface DelegationSettings {
+  company_header: string | null;
+  signature: string | null;
+}
+
+export interface DelegationResult {
+  id: string;
+  user_id: string;
+  source_email_id: string;
+  source_thread_id: string | null;
+  original_subject: string | null;
+  status: string;
+  created_at: string;
+  items: DelegationItem[];
+}
+
+export interface DelegateEmailResponse {
+  is_delegation: boolean;
+  message: string | null;
+  delegation: DelegationResult | null;
+}
+
+export interface Department {
+  id: string;
+  user_id: string;
+  name: string;
+  email: string;
+  keywords: string | null;
+  created_at: string;
+}
+
+export type RuleField = 'sender' | 'subject' | 'body' | 'sender_domain';
+export type RuleOperator = 'contains' | 'equals' | 'starts_with' | 'ends_with' | 'not_contains' | 'regex';
+export type RuleAction = 'force_category' | 'skip_ai' | 'trash' | 'alert' | 'skip_draft';
+export type ForcedCategory = 'urgent' | 'important' | 'need_reply' | 'newsletter' | 'spam';
+
+export interface ProcessEmailResult {
+  category: string;
+  priority_score: number;
+  summary: string;
+  confidence: number;
+  draft_content: string | null;
+  draft_subject: string | null;
+  is_safe: boolean;
+  security_risk_level: string | null;
+  security_warnings: string[];
+}
+
+export interface EmailRule {
+  id: string;
+  user_id: string;
+  name: string;
+  field: RuleField;
+  operator: RuleOperator;
+  value: string;
+  action: RuleAction;
+  action_value: string | null;
+  priority: number;
+  is_active: boolean;
+  created_at: string;
+  match_count: number;
 }

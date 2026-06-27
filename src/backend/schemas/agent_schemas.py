@@ -268,8 +268,9 @@ class SchedulingOutput(BaseModel):
 
     @model_validator(mode="after")
     def validate_meeting_fields(self) -> "SchedulingOutput":
-        """Enforce that datetime and summary are populated for meeting requests."""
-        if self.is_meeting_request:
+        # is_meeting_request=True + action=None is valid: vague request, no concrete time.
+        # Only enforce datetime/summary when a concrete action (with times) is present.
+        if self.is_meeting_request and self.action is not None:
             missing = [
                 field
                 for field, val in [
@@ -281,6 +282,66 @@ class SchedulingOutput(BaseModel):
             ]
             if missing:
                 raise ValueError(
-                    f"Fields {missing} must be non-null when is_meeting_request is True."
+                    f"Fields {missing} must be non-null when action is set."
                 )
         return self
+
+
+# ---------------------------------------------------------------------------
+# Delegation agent schemas
+# ---------------------------------------------------------------------------
+
+
+class DepartmentAssignment(BaseModel):
+    """One department's portion of work extracted from an email."""
+
+    department_name: str = Field(
+        ...,
+        description=(
+            "Name of the department. Use 'Chưa xác định' when no department clearly "
+            "matches or when work items touch keywords of two or more departments ambiguously."
+        ),
+    )
+    matched_department_id: str | None = Field(
+        default=None,
+        description="'id' value from known_departments that best matches; null when department_name is 'Chưa xác định'.",
+    )
+    work_items: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Work items belonging EXCLUSIVELY to this department.",
+    )
+    priority: int = Field(default=3, ge=1, le=5, description="Priority 1 (lowest) – 5 (highest).")
+    suggested_deadline: str | None = Field(
+        default=None,
+        description="ISO YYYY-MM-DD date if the email mentions a deadline; null otherwise.",
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence 0.0–1.0 in the department assignment. "
+            "≥0.7 = clear keyword match; <0.7 = ambiguous or inferred."
+        ),
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Short Vietnamese explanation of why this department was assigned (or not).",
+    )
+
+
+class DelegationOutput(BaseModel):
+    """Structured output of the Delegation Agent."""
+
+    is_delegation: bool = Field(
+        ...,
+        description=(
+            "True when the email assigns concrete work to ONE OR MORE departments/teams. "
+            "False only for announcements, newsletters, or purely personal messages."
+        ),
+    )
+    assignments: list[DepartmentAssignment] = Field(
+        default_factory=list,
+        description="One entry per department (or 'Chưa xác định'). Empty when is_delegation is False.",
+    )
