@@ -198,18 +198,6 @@ export default function AdminOverviewPage() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  const handleSchedulerToggle = async () => {
-    if (!schedulerStatus) return;
-    try {
-      if (schedulerStatus.is_running) {
-        await api.post("/scheduler/stop");
-      } else {
-        await api.post("/scheduler/start");
-      }
-      mutateScheduler();
-    } catch { /* ignore */ }
-  };
-
   const handleRunNow = async () => {
     try {
       await api.post("/scheduler/run-now");

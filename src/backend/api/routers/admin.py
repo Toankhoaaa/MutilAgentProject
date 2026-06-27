@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
 from backend.api.dependencies import require_admin
+from backend.core.constants import SHARED_USER_ID
 from backend.models.user import User
 from backend.services.chroma_service import ChromaService
 
@@ -105,6 +106,6 @@ async def ingest_document(
     stem = Path(file.filename or "document").stem
     ids = [f"{stem}_{i}" for i in range(len(chunks))]
 
-    ChromaService().add_documents(texts=chunks, ids=ids)
+    ChromaService().add_documents(texts=chunks, ids=ids, metadatas=[{"user_id": SHARED_USER_ID}] * len(chunks))
 
     return IngestResponse(success=True, filename=file.filename or "", chunks_added=len(chunks))

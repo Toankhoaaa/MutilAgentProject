@@ -60,7 +60,7 @@ async def chat(
 ) -> StreamingResponse:
     """Stream the Chatbot Agent's response, including tool-execution status events."""
     try:
-        agent = ChatbotAgent(gmail_service=gmail_service)
+        agent = ChatbotAgent(gmail_service=gmail_service, user_id=str(current_user.id))
         agent.load_history([m.model_dump() for m in payload.history])
     except ValueError as exc:
         raise HTTPException(

@@ -1,4 +1,5 @@
 import Head from "next/head";
+import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/router";
 import api from "@/lib/axios";
@@ -170,9 +171,9 @@ export default function AdminRegisterPage() {
 
             <p className="mt-6 text-center text-sm text-slate-500">
               Already registered?{" "}
-              <a href="/admin/login" className="text-indigo-600 hover:underline font-medium">
+              <Link href="/admin/login" className="text-indigo-600 hover:underline font-medium">
                 Sign in
-              </a>
+              </Link>
             </p>
           </div>
         </div>

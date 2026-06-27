@@ -15,7 +15,15 @@ interface SecurityToast {
   warnings: string[];
 }
 
-type Toast = UrgentToast | SecurityToast;
+interface TaskReminderToast {
+  id: number;
+  type: "TASK_REMINDER";
+  title: string;
+  deadline: string | null;
+  priority: number;
+}
+
+type Toast = UrgentToast | SecurityToast | TaskReminderToast;
 
 let _nextId = 1;
 
@@ -47,6 +55,16 @@ export default function NotificationToast() {
         setToasts((prev) => [...prev.slice(-4), toast]);
         // Security alerts stay longer — 12s
         setTimeout(() => dismiss(toast.id), 12000);
+      } else if (msg.type === "TASK_REMINDER") {
+        const toast: TaskReminderToast = {
+          id: _nextId++,
+          type: "TASK_REMINDER",
+          title: (msg.title as string) ?? "Công việc",
+          deadline: (msg.deadline as string | null) ?? null,
+          priority: (msg.priority as number) ?? 3,
+        };
+        setToasts((prev) => [...prev.slice(-4), toast]);
+        setTimeout(() => dismiss(toast.id), 10000);
       }
     },
     [dismiss],
@@ -82,6 +100,27 @@ export default function NotificationToast() {
                     )}
                   </ul>
                 )}
+              </div>
+              <button className="toast-close" onClick={() => dismiss(t.id)}>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          );
+        }
+
+        if (t.type === "TASK_REMINDER") {
+          const deadlineStr = t.deadline
+            ? new Date(t.deadline).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" })
+            : null;
+          return (
+            <div key={t.id} className="toast" style={{ borderColor: "#a78bfa", backgroundColor: "#f5f3ff" }}>
+              <div className="flex-1 min-w-0">
+                <p className="toast-title" style={{ color: "#6d28d9" }}>
+                  🔔 Nhắc việc: {t.title}
+                </p>
+                {deadlineStr && <p className="toast-body">Deadline: {deadlineStr}</p>}
               </div>
               <button className="toast-close" onClick={() => dismiss(t.id)}>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

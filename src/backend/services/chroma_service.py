@@ -87,3 +87,16 @@ class ChromaService:
             return
         self._collection.delete(ids=ids)
         logger.info("Deleted %d documents from ChromaDB.", len(ids))
+
+    def reset_collection(self) -> None:
+        """Drop and recreate the collection, removing all documents."""
+        self._client.delete_collection(_COLLECTION_NAME)
+        self._collection = self._client.get_or_create_collection(
+            name=_COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.info("ChromaDB collection '%s' reset.", _COLLECTION_NAME)
+
+    def count(self) -> int:
+        """Return the number of documents currently in the collection."""
+        return self._collection.count()

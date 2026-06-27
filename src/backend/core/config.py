@@ -1,4 +1,6 @@
-from pydantic import field_validator
+import sys
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +38,7 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
     CHROMA_PERSIST_PATH: str = "./chroma_db"
     ADMIN_REGISTRATION_SECRET: str = "change-me-admin-secret"
+    ENVIRONMENT: str = "development"
 
     model_config = SettingsConfigDict(
         env_file=[".env", "../.env"],
@@ -49,6 +52,21 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return normalize_gemini_model(value)
         return value
+
+    @model_validator(mode="after")
+    def _check_weak_secrets(self) -> "Settings":
+        _WEAK_DEFAULTS = {
+            "JWT_SECRET_KEY": "dev-change-me-in-production-32b!",
+            "SECRET_KEY": "your-super-secret-key-make-it-long",
+            "ADMIN_REGISTRATION_SECRET": "change-me-admin-secret",
+        }
+        for name, default in _WEAK_DEFAULTS.items():
+            if getattr(self, name) == default:
+                msg = f"[SECURITY] {name} is using the default insecure value — set it in .env"
+                if self.ENVIRONMENT.lower() == "production":
+                    raise ValueError(msg + " (cannot start in production with default secrets)")
+                print(f"\n⚠️  WARNING: {msg}\n", file=sys.stderr, flush=True)
+        return self
 
 
 settings = Settings()

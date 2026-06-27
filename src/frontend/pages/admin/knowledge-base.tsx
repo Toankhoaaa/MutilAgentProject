@@ -116,6 +116,31 @@ export default function AdminKnowledgeBasePage() {
   const [deleteDoc, setDeleteDoc] = useState<KnowledgeDocument | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    const ext = f.name.substring(f.name.lastIndexOf(".")).toLowerCase();
+    if (ext !== ".pdf" && ext !== ".docx") {
+      setUploadError("Only PDF and DOCX files are accepted.");
+      setUploadFile(null);
+      return;
+    }
+    setUploadError(null);
+    setUploadFile(f);
+  }, []);
+
+  const closeUpload = useCallback(() => {
+    setShowUpload(false);
+    setUploadFile(null);
+    setUploadSource("");
+    setUploadNotes("");
+    setUploadError(null);
+    setUploadProgress(0);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+
   if (authError) return null;
 
   // ── Handlers ────────────────────────────────────────────────────────────────
@@ -162,21 +187,6 @@ export default function AdminKnowledgeBasePage() {
     }
   };
 
-  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const f = e.dataTransfer.files[0];
-    if (!f) return;
-    const ext = f.name.substring(f.name.lastIndexOf(".")).toLowerCase();
-    if (ext !== ".pdf" && ext !== ".docx") {
-      setUploadError("Only PDF and DOCX files are accepted.");
-      setUploadFile(null);
-      return;
-    }
-    setUploadError(null);
-    setUploadFile(f);
-  }, []);
-
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0] ?? null;
     setUploadError(null);
@@ -221,16 +231,6 @@ export default function AdminKnowledgeBasePage() {
       setUploading(false);
     }
   };
-
-  const closeUpload = useCallback(() => {
-    setShowUpload(false);
-    setUploadFile(null);
-    setUploadSource("");
-    setUploadNotes("");
-    setUploadError(null);
-    setUploadProgress(0);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }, []);
 
   const docs = listData?.items ?? [];
 

@@ -205,20 +205,31 @@ class GmailService:
 
         return results
 
-    async def fetch_emails(self, query: str = "in:inbox", limit: int = 50) -> list[dict[str, Any]]:
-        """Fetch messages matching a Gmail search query."""
+    async def fetch_emails(
+        self,
+        query: str = "in:inbox",
+        limit: int = 20,
+        page_token: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch one page of messages matching a Gmail search query.
+
+        Returns:
+            A tuple of (email_list, next_page_token). next_page_token is None
+            when there are no more pages.
+        """
         service = await self.get_service()
+        kwargs: dict[str, Any] = {"userId": "me", "q": query, "maxResults": limit}
+        if page_token:
+            kwargs["pageToken"] = page_token
         try:
             list_response = await asyncio.to_thread(
-                lambda: service.users()
-                .messages()
-                .list(userId="me", q=query, maxResults=limit)
-                .execute()
+                lambda: service.users().messages().list(**kwargs).execute()
             )
         except HttpError as exc:
             raise self._wrap_http_error(exc, "Failed to list Gmail messages.") from exc
 
         messages = list_response.get("messages", [])
+        next_page_token: str | None = list_response.get("nextPageToken")
         results: list[dict[str, Any]] = []
 
         for message_ref in messages:
@@ -236,7 +247,7 @@ class GmailService:
 
             results.append(self._parse_message(full_message))
 
-        return results
+        return results, next_page_token
 
     async def create_draft(
         self,
@@ -244,10 +255,14 @@ class GmailService:
         subject: str,
         body: str,
         thread_id: str | None = None,
+        cc: str | None = None,
+        bcc: str | None = None,
     ) -> str:
         """Create a Gmail draft for the authenticated user."""
         service = await self.get_service()
-        raw_message = self._build_raw_message(to=to, subject=subject, body=body, thread_id=thread_id)
+        raw_message = self._build_raw_message(
+            to=to, subject=subject, body=body, thread_id=thread_id, cc=cc, bcc=bcc
+        )
         draft_body: dict[str, Any] = {"message": {"raw": raw_message}}
         if thread_id:
             draft_body["message"]["threadId"] = thread_id
@@ -347,7 +362,8 @@ class GmailService:
         Raises:
             GmailAPIError: When the Gmail search API returns an error.
         """
-        return await self.fetch_emails(query=query, limit=limit)
+        emails, _ = await self.fetch_emails(query=query, limit=limit)
+        return emails
 
     async def get_email_content(self, email_id: str) -> str:
         """Fetch a single email by its Gmail message ID and return the plain-text body.
@@ -386,6 +402,19 @@ class GmailService:
 
         parsed = self._parse_message(full_message)
         return parsed.get("body") or parsed.get("snippet") or ""
+
+    async def fetch_message(self, message_id: str) -> dict[str, Any]:
+        """Fetch a single Gmail message and return the normalized parsed dict (subject, body, thread_id, etc.)."""
+        service = await self.get_service()
+        try:
+            full_message = await asyncio.to_thread(
+                lambda: service.users().messages().get(userId="me", id=message_id, format="full").execute()
+            )
+        except HttpError as exc:
+            if getattr(exc.resp, "status", None) == 404:
+                raise GmailAPIError(f"Message {message_id} not found.") from exc
+            raise self._wrap_http_error(exc, f"Failed to fetch message {message_id}.") from exc
+        return self._parse_message(full_message)
 
     async def cleanup_spam_folder(self) -> dict[str, Any]:
         """Move all messages in the Gmail SPAM folder to trash.
@@ -510,11 +539,17 @@ class GmailService:
         subject: str,
         body: str,
         thread_id: str | None = None,
+        cc: str | None = None,
+        bcc: str | None = None,
     ) -> str:
         """Build a base64url-encoded RFC 2822 message for the Gmail API."""
         mime_message = MIMEText(body, "plain", "utf-8")
         mime_message["to"] = to
         mime_message["subject"] = subject
+        if cc:
+            mime_message["cc"] = cc
+        if bcc:
+            mime_message["bcc"] = bcc
         if thread_id:
             mime_message["X-Gmail-Thread-Id"] = thread_id
 

@@ -19,7 +19,7 @@ from backend.core.database import get_db
 from backend.core.security import create_access_token, get_password_hash, verify_password
 from backend.models.user import User
 from backend.schemas.api_schemas import TokenResponse, UserProfileResponse
-from backend.schemas.auth_schemas import AdminLoginRequest, AdminRegisterRequest, AdminTokenResponse
+from backend.schemas.auth_schemas import AdminLoginRequest, AdminRegisterRequest
 
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,8 @@ oauth.register(
         "scope": (
             "openid email profile "
             "https://www.googleapis.com/auth/gmail.modify "
-            "https://www.googleapis.com/auth/calendar"
+            "https://www.googleapis.com/auth/calendar.readonly "
+            "https://www.googleapis.com/auth/calendar.events"
         ),
     },
 )
@@ -210,9 +211,13 @@ def admin_register(payload: AdminRegisterRequest, db: Session = Depends(get_db))
     return {"message": "Admin account created successfully."}
 
 
-@router.post("/admin/login", response_model=AdminTokenResponse)
-def admin_login(payload: AdminLoginRequest, db: Session = Depends(get_db)) -> AdminTokenResponse:
-    """Authenticate an admin via email + password and return a JWT."""
+@router.post("/admin/login", response_model=UserProfileResponse)
+def admin_login(
+    payload: AdminLoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> UserProfileResponse:
+    """Authenticate an admin via email + password, open a session, and return the user profile."""
     user = db.scalar(select(User).where(User.email == payload.email))
     if user is None or not user.hashed_password:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
@@ -220,8 +225,13 @@ def admin_login(payload: AdminLoginRequest, db: Session = Depends(get_db)) -> Ad
     if not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials.")
 
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is disabled.")
+
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint is for admins only.")
 
-    token = create_access_token(user_id=user.id, email=user.email, is_admin=True)
-    return AdminTokenResponse(access_token=token)
+    # Write the session the same way the Google OAuth callback does — the Starlette
+    # SessionMiddleware sets an httpOnly signed cookie, so no token is exposed to JS.
+    request.session["user_id"] = str(user.id)
+    return UserProfileResponse.model_validate(user)

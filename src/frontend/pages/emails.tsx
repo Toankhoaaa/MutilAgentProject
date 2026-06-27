@@ -1,5 +1,5 @@
 import Head from "next/head";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import useSWR from "swr";
 import axios from "axios";
@@ -8,20 +8,41 @@ import NotificationToast from "@/components/NotificationToast";
 import EmailTable from "@/components/EmailTable";
 import EmailDetailSheet from "@/components/EmailDetailSheet";
 import api from "@/lib/axios";
+import { RefreshCw, Zap, Inbox, Trash2, CheckCircle, XCircle } from "lucide-react";
 import type {
   UserProfile,
   ProcessEmailsResult,
+  ProcessEmailResult,
   GmailEmailItem,
+  GmailListResponse,
   InboxEmailState,
   AnalyzeEmailResponse,
 } from "@/lib/types";
 
+type InboxCacheEntry = Omit<InboxEmailState, "analysis" | "isAnalyzing">;
+
+function _inboxKey(userId: string) { return `inbox_${userId}`; }
+
+function saveInboxSession(emails: InboxEmailState[], userId: string) {
+  try {
+    const entries: InboxCacheEntry[] = emails.map(({ analysis: _a, isAnalyzing: _i, ...rest }) => rest);
+    sessionStorage.setItem(_inboxKey(userId), JSON.stringify(entries));
+  } catch {}
+}
+
+function loadInboxSession(userId: string): InboxCacheEntry[] | null {
+  try {
+    const raw = sessionStorage.getItem(_inboxKey(userId));
+    return raw ? (JSON.parse(raw) as InboxCacheEntry[]) : null;
+  } catch { return null; }
+}
+
 const CATEGORY_STYLES: Record<string, string> = {
-  urgent: "bg-red-100 text-red-700",
-  important: "bg-orange-100 text-orange-700",
-  need_reply: "bg-blue-100 text-blue-700",
-  newsletter: "bg-zinc-100 text-zinc-600",
-  spam: "bg-zinc-200 text-zinc-500",
+  urgent: "bg-error-soft text-error border border-error-soft",
+  important: "bg-warning-soft text-warning border border-warning-soft",
+  need_reply: "bg-warning-soft text-warning border border-warning-soft",
+  newsletter: "bg-canvas-soft-2 text-mute border border-hairline",
+  spam: "bg-canvas-soft-2 text-mute border border-hairline",
 };
 
 const fetcher = (url: string) => api.get(url).then((r) => r.data);
@@ -42,11 +63,16 @@ export default function EmailsPage() {
 
   // Analysis cache — survives re-opens without re-fetching
   const analysisCacheRef = useRef<Map<string, AnalyzeEmailResponse>>(new Map());
+  const sessionHydratedRef = useRef(false);
 
   // Inbox state
   const [inboxEmails, setInboxEmails] = useState<InboxEmailState[] | null>(null);
   const [loadingInbox, setLoadingInbox] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [inboxError, setInboxError] = useState<string | null>(null);
+  const [hideSocial, setHideSocial] = useState(false);
+  const [showPromo, setShowPromo] = useState(false);
 
   // Processing state
   const [processing, setProcessing] = useState(false);
@@ -67,6 +93,28 @@ export default function EmailsPage() {
     revalidateOnFocus: false,
   });
 
+  // Hydrate inbox from sessionStorage once on first user load
+  useEffect(() => {
+    if (!user?.id || sessionHydratedRef.current) return;
+    sessionHydratedRef.current = true;
+    const cached = loadInboxSession(user.id);
+    if (cached) {
+      setInboxEmails(
+        cached.map((e) => ({
+          ...e,
+          analysis: analysisCacheRef.current.get(e.gmail_message_id) ?? null,
+          isAnalyzing: false,
+        }))
+      );
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // Persist inbox to sessionStorage whenever it changes
+  useEffect(() => {
+    if (inboxEmails && user?.id) saveInboxSession(inboxEmails, user.id);
+  }, [inboxEmails, user?.id]);
+
   if (authError) return null;
 
   const isAdmin = user?.is_admin === true;
@@ -76,18 +124,29 @@ export default function EmailsPage() {
     ? inboxEmails.filter((e) => e.category === null || INBOX_FILTER.has(e.category.toLowerCase()))
     : null;
 
-  const handleLoadInbox = async () => {
+  const _toInboxState = (e: GmailEmailItem): InboxEmailState => ({
+    ...e,
+    analysis: analysisCacheRef.current.get(e.gmail_message_id) ?? null,
+    isAnalyzing: false,
+    category: null,
+    priority_score: null,
+  });
+
+  const buildInboxQuery = (hs: boolean, sp: boolean) =>
+    ["in:inbox", !sp && "-category:promotions", hs && "-category:social"]
+      .filter(Boolean)
+      .join(" ");
+
+  const inboxQuery = buildInboxQuery(hideSocial, showPromo);
+
+  const fetchInbox = async (query: string) => {
     setLoadingInbox(true);
     setInboxError(null);
+    setNextPageToken(null);
     try {
-      const res = await api.get<GmailEmailItem[]>("/emails/list?limit=20");
-      const items: InboxEmailState[] = res.data.map((e) => ({
-        ...e,
-        analysis: analysisCacheRef.current.get(e.gmail_message_id) ?? null,
-        isAnalyzing: false,
-        category: null,
-        priority_score: null,
-      }));
+      const res = await api.get<GmailListResponse>(`/emails/list?limit=20&query=${encodeURIComponent(query)}`);
+      const items: InboxEmailState[] = res.data.emails.map(_toInboxState);
+      setNextPageToken(res.data.next_page_token);
       setInboxEmails(items);
 
       // Background classify-quick — inbox stays functional if this fails
@@ -119,12 +178,68 @@ export default function EmailsPage() {
                 : null,
             );
           })
-          .catch(() => {}); // graceful degradation — badges simply don't appear
+          .catch(() => {});
       }
     } catch {
       setInboxError("Không thể tải inbox. Kiểm tra kết nối Gmail.");
     } finally {
       setLoadingInbox(false);
+    }
+  };
+
+  const handleLoadInbox = () => fetchInbox(inboxQuery);
+
+  const handleToggleSocial = async () => {
+    const next = !hideSocial;
+    setHideSocial(next);
+    if (inboxEmails !== null) await fetchInbox(buildInboxQuery(next, showPromo));
+  };
+
+  const handleTogglePromo = async () => {
+    const next = !showPromo;
+    setShowPromo(next);
+    if (inboxEmails !== null) await fetchInbox(buildInboxQuery(hideSocial, next));
+  };
+
+  const handleLoadMore = async () => {
+    if (!nextPageToken || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await api.get<GmailListResponse>(`/emails/list?limit=20&page_token=${encodeURIComponent(nextPageToken)}&query=${encodeURIComponent(inboxQuery)}`);
+      const newItems = res.data.emails.map(_toInboxState);
+      setNextPageToken(res.data.next_page_token);
+      setInboxEmails((prev) => {
+        if (!prev) return newItems;
+        const existingIds = new Set(prev.map((e) => e.gmail_message_id));
+        return [...prev, ...newItems.filter((e) => !existingIds.has(e.gmail_message_id))];
+      });
+
+      const classifyPayload = newItems
+        .filter((e) => e.thread_id)
+        .map((e) => ({ thread_id: e.thread_id!, subject: e.subject ?? "", snippet: e.snippet ?? "", sender: e.sender }));
+      if (classifyPayload.length > 0) {
+        api
+          .post<Array<{ thread_id: string; category: string; priority_score: number; confidence: number }>>(
+            "/emails/classify-quick",
+            classifyPayload,
+          )
+          .then((r) => {
+            const resultMap = new Map(r.data.map((x) => [x.thread_id, x]));
+            setInboxEmails((prev) =>
+              prev
+                ? prev.map((email) => {
+                    const hit = email.thread_id ? resultMap.get(email.thread_id) : undefined;
+                    return hit ? { ...email, category: hit.category, priority_score: hit.priority_score } : email;
+                  })
+                : null,
+            );
+          })
+          .catch(() => {});
+      }
+    } catch {
+      setInboxError("Không thể tải thêm email. Thử lại sau.");
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -161,8 +276,20 @@ export default function EmailsPage() {
     processingControllerRef.current?.abort();
     const taskId = processingTaskIdRef.current;
     if (taskId) {
-      api.post(`/tasks/${taskId}/cancel`).catch(() => {});
+      api.post(`/pipeline/${taskId}/cancel`).catch(() => {});
     }
+  };
+
+  const handleGenerateDraft = async (email: InboxEmailState, tone: string): Promise<ProcessEmailResult> => {
+    const res = await api.post<ProcessEmailResult>("/emails/classify", {
+      subject: email.subject ?? "",
+      text: email.snippet ?? "(no preview)",
+      sender: email.sender ?? "",
+      gmail_message_id: email.gmail_message_id,
+      tone,
+      generate_draft: true,
+    });
+    return res.data;
   };
 
   const handleCleanupSpam = async () => {
@@ -190,10 +317,10 @@ export default function EmailsPage() {
 
           {/* ── Inbox Viewer ── */}
           <section className="card">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-3">
               <div>
-                <h2 className="text-sm font-semibold text-zinc-800">Inbox</h2>
-                <p className="text-xs text-zinc-400 mt-0.5">Xem email từ Gmail — không lưu vào database</p>
+                <h2 className="text-sm font-semibold text-ink">Inbox</h2>
+                <p className="text-xs text-mute mt-0.5">Xem email từ Gmail — không lưu vào database</p>
               </div>
               <button
                 onClick={handleLoadInbox}
@@ -202,74 +329,129 @@ export default function EmailsPage() {
               >
                 {loadingInbox ? (
                   <>
-                    <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-400 border-t-transparent animate-spin" />
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-body border-t-transparent animate-spin" />
                     Đang tải…
                   </>
                 ) : (
                   <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
+                    <RefreshCw size={14} strokeWidth={1.75} />
                     {inboxEmails ? "Làm mới" : "Tải Inbox"}
                   </>
                 )}
               </button>
             </div>
+            <div className="flex items-center gap-4 mb-4 text-xs text-mute">
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={hideSocial}
+                  onChange={handleToggleSocial}
+                  disabled={loadingInbox}
+                  className="accent-ink"
+                />
+                Ẩn mạng xã hội
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showPromo}
+                  onChange={handleTogglePromo}
+                  disabled={loadingInbox}
+                  className="accent-ink"
+                />
+                Hiển thị quảng cáo
+              </label>
+            </div>
 
             {inboxError && (
-              <p className="text-sm text-rose-600 bg-rose-50 px-3 py-2 rounded-lg border border-rose-100">
+              <p className="text-sm text-error bg-error-soft px-3 py-2 rounded-sm border border-error-soft mb-3">
                 {inboxError}
               </p>
             )}
 
-            {displayedEmails && displayedEmails.length === 0 && (
-              <p className="text-sm text-zinc-400 text-center py-6">Inbox trống.</p>
-            )}
-
-            {displayedEmails && displayedEmails.length > 0 && (
-              <div className="divide-y divide-zinc-100 -mx-4 sm:mx-0">
-                {displayedEmails.map((email) => (
-                  <div
-                    key={email.gmail_message_id}
-                    onClick={() => setSelectedEmail(email)}
-                    className="py-3 px-4 flex gap-3 items-start hover:bg-zinc-50 cursor-pointer transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline gap-2 mb-0.5">
-                        <span className="text-sm font-medium text-zinc-800 truncate">
-                          {email.sender || "—"}
-                        </span>
-                        <span className="text-xs text-zinc-400 shrink-0">{formatDate(email.date)}</span>
-                      </div>
-                      <p className="text-sm text-zinc-700 truncate">{email.subject || "(no subject)"}</p>
-                      {email.snippet && (
-                        <p className="text-xs text-zinc-400 truncate mt-0.5">{email.snippet}</p>
-                      )}
+            {/* Skeleton rows — first load only */}
+            {loadingInbox && !displayedEmails && (
+              <div className="divide-y divide-hairline -mx-4 sm:mx-0">
+                {[...Array(5)].map((_, i) => (
+                  <div key={i} className="py-3 px-4 animate-pulse">
+                    <div className="flex gap-2 mb-1.5">
+                      <div className="h-3 bg-canvas-soft-2 rounded-sm w-28" />
+                      <div className="h-3 bg-canvas-soft-2 rounded-sm w-14 ml-auto" />
                     </div>
-                    <div className="flex items-center gap-2 shrink-0 pt-0.5">
-                      {email.category && (
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                            CATEGORY_STYLES[email.category.toLowerCase()] ?? "bg-zinc-100 text-zinc-600"
-                          }`}
-                        >
-                          {email.category}
-                        </span>
-                      )}
-                      {email.priority_score != null && (
-                        <span className="text-xs text-zinc-400">P{email.priority_score}</span>
-                      )}
-                    </div>
+                    <div className="h-3 bg-canvas-soft-2 rounded-sm w-48 mb-1" />
+                    <div className="h-3 bg-canvas-soft-2 rounded-sm w-64" />
                   </div>
                 ))}
               </div>
             )}
 
+            {displayedEmails && displayedEmails.length === 0 && (
+              <div className="flex flex-col items-center gap-2 py-10 text-center">
+                <Inbox size={28} strokeWidth={1.25} className="text-mute" />
+                <p className="text-sm text-mute">Inbox trống.</p>
+              </div>
+            )}
+
+            {displayedEmails && displayedEmails.length > 0 && (
+              <>
+                <div className="divide-y divide-hairline -mx-4 sm:mx-0">
+                  {displayedEmails.map((email) => (
+                    <div
+                      key={email.gmail_message_id}
+                      onClick={() => setSelectedEmail(email)}
+                      className="py-3 px-4 flex gap-3 items-start hover:bg-canvas-soft-2 cursor-pointer transition-colors"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2 mb-0.5">
+                          <span className="text-sm font-medium text-ink truncate">
+                            {email.sender || "—"}
+                          </span>
+                          <span className="text-xs text-mute shrink-0">{formatDate(email.date)}</span>
+                        </div>
+                        <p className="text-sm font-medium text-body truncate">{email.subject || "(no subject)"}</p>
+                        {email.snippet && (
+                          <p className="text-xs text-mute truncate mt-0.5">{email.snippet}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                        {email.category && (
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded-sm text-xs ${CATEGORY_STYLES[email.category.toLowerCase()] ?? "bg-canvas-soft-2 text-mute border border-hairline"}`}>
+                            {email.category}
+                          </span>
+                        )}
+                        {email.priority_score != null && (
+                          <span className="text-xs text-mute font-mono">P{email.priority_score}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {nextPageToken && (
+                  <div className="mt-3 flex justify-center">
+                    <button
+                      onClick={handleLoadMore}
+                      disabled={loadingMore}
+                      className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {loadingMore ? (
+                        <>
+                          <span className="w-3.5 h-3.5 rounded-full border-2 border-body border-t-transparent animate-spin" />
+                          Đang tải...
+                        </>
+                      ) : (
+                        "Tải thêm"
+                      )}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
             {!displayedEmails && !loadingInbox && !inboxError && (
-              <p className="text-sm text-zinc-400 text-center py-6">
-                Nhấn "Tải Inbox" để xem email.
-              </p>
+              <div className="flex flex-col items-center gap-2 py-10 text-center">
+                <Inbox size={28} strokeWidth={1.25} className="text-mute" />
+                <p className="text-sm text-mute">Nhấn &quot;Tải Inbox&quot; để xem email.</p>
+              </div>
             )}
           </section>
 
@@ -277,14 +459,14 @@ export default function EmailsPage() {
           {isAdmin && <section className="card">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h2 className="text-sm font-semibold text-zinc-800">AI Email Pipeline</h2>
-                <p className="text-xs text-zinc-400 mt-0.5">Phân loại email và tạo nháp trả lời tự động</p>
+                <h2 className="text-sm font-semibold text-ink">AI Email Pipeline</h2>
+                <p className="text-xs text-mute mt-0.5">Phân loại email và tạo nháp trả lời tự động</p>
               </div>
               <div className="flex items-center gap-2">
                 {processing && (
                   <button
                     onClick={handleAbortProcessing}
-                    className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-rose-600 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 transition-colors"
+                    className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-error bg-error-soft border border-error-soft rounded-sm hover:opacity-80 transition-colors"
                   >
                     Dừng
                   </button>
@@ -301,10 +483,7 @@ export default function EmailsPage() {
                     </>
                   ) : (
                     <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                      </svg>
+                      <Zap size={14} strokeWidth={1.75} />
                       Process Emails
                     </>
                   )}
@@ -313,7 +492,7 @@ export default function EmailsPage() {
             </div>
 
             {abortedToast && (
-              <div className="flex items-center gap-2 mb-4 px-3 py-2 text-sm rounded-lg bg-amber-50 text-amber-700 border border-amber-100">
+              <div className="flex items-center gap-2 mb-4 px-3 py-2 text-sm rounded-sm bg-warning-soft text-warning border border-warning-soft">
                 Đã hủy xử lý
               </div>
             )}
@@ -328,11 +507,11 @@ export default function EmailsPage() {
                     ["Drafts Created", processResult.drafts_created],
                     ["Failed", processResult.failed],
                   ] as [string, number][]).map(([label, value]) => (
-                    <div key={label} className="text-center bg-zinc-50 rounded-lg py-3">
-                      <p className={`text-2xl font-bold ${label === "Failed" && value > 0 ? "text-rose-600" : "text-zinc-900"}`}>
+                    <div key={label} className="text-center bg-canvas-soft-2 rounded-md py-3">
+                      <p className={`text-2xl font-semibold ${label === "Failed" && value > 0 ? "text-error" : "text-ink"}`}>
                         {value}
                       </p>
-                      <p className="text-xs text-zinc-400 mt-0.5">{label}</p>
+                      <p className="text-xs text-mute font-mono mt-0.5">{label}</p>
                     </div>
                   ))}
                 </div>
@@ -340,7 +519,7 @@ export default function EmailsPage() {
                 {/* Per-email results */}
                 {processResult.processed_emails.length > 0 && (
                   <div>
-                    <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-3">
+                    <h3 className="text-xs font-mono text-mute uppercase tracking-wide mb-3">
                       Chi tiết từng email
                     </h3>
                     <EmailTable
@@ -364,11 +543,11 @@ export default function EmailsPage() {
                 )}
 
                 {processResult.errors.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-zinc-100">
-                    <p className="text-xs font-semibold text-rose-600 mb-2">Errors</p>
+                  <div className="mt-4 pt-4 border-t border-hairline">
+                    <p className="text-xs font-mono text-error mb-2">Errors</p>
                     <ul className="space-y-1">
                       {processResult.errors.map((err, i) => (
-                        <li key={i} className="text-xs text-zinc-500 font-mono bg-zinc-50 px-2 py-1 rounded">
+                        <li key={i} className="text-xs text-mute font-mono bg-canvas-soft-2 px-2 py-1 rounded-sm">
                           {JSON.stringify(err)}
                         </li>
                       ))}
@@ -379,8 +558,8 @@ export default function EmailsPage() {
             )}
 
             {!processResult && !processing && (
-              <p className="text-sm text-zinc-400 text-center py-6">
-                Nhấn "Process Emails" để chạy AI pipeline.
+              <p className="text-sm text-mute text-center py-6">
+                Nhấn &quot;Process Emails&quot; để chạy AI pipeline.
               </p>
             )}
           </section>}
@@ -389,44 +568,37 @@ export default function EmailsPage() {
           {isAdmin && <section className="card">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-sm font-semibold text-zinc-800 mb-1">Spam Cleanup</h2>
-                <p className="text-xs text-zinc-400">Chuyển toàn bộ thư mục SPAM sang thùng rác.</p>
+                <h2 className="text-sm font-semibold text-ink mb-1">Spam Cleanup</h2>
+                <p className="text-xs text-mute">Chuyển toàn bộ thư mục SPAM sang thùng rác.</p>
               </div>
               <button
                 onClick={handleCleanupSpam}
                 disabled={cleanupLoading}
-                className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed text-rose-600 border-rose-200 hover:bg-rose-50 whitespace-nowrap"
+                className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed text-error border-error-soft hover:bg-error-soft whitespace-nowrap"
               >
                 {cleanupLoading ? (
                   <>
-                    <span className="w-3.5 h-3.5 rounded-full border-2 border-rose-400 border-t-transparent animate-spin" />
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-error border-t-transparent animate-spin" />
                     Cleaning…
                   </>
                 ) : (
                   <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
+                    <Trash2 size={14} strokeWidth={1.75} />
                     Clean Up SPAM
                   </>
                 )}
               </button>
             </div>
             {cleanupResult && (
-              <div className={`mt-4 flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
+              <div className={`mt-4 flex items-center gap-2 text-sm px-3 py-2 rounded-sm border ${
                 cleanupResult.type === "success"
-                  ? "bg-emerald-50 text-emerald-700 border border-emerald-100"
-                  : "bg-rose-50 text-rose-700 border border-rose-100"
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-100"
+                  : "bg-error-soft text-error border-error-soft"
               }`}>
                 {cleanupResult.type === "success" ? (
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
+                  <CheckCircle size={14} strokeWidth={1.75} className="shrink-0" />
                 ) : (
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <XCircle size={14} strokeWidth={1.75} className="shrink-0" />
                 )}
                 {cleanupResult.message}
               </div>
@@ -443,6 +615,7 @@ export default function EmailsPage() {
         onAnalysisComplete={(id, result) => {
           analysisCacheRef.current.set(id, result);
         }}
+        onGenerateDraft={handleGenerateDraft}
         isAdmin={isAdmin}
       />
     </>

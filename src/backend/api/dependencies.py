@@ -18,7 +18,6 @@ from backend.services.agents import (
 )
 from backend.services.calendar_service import GoogleCalendarService
 from backend.services.gmail_service import (
-    GmailAuthenticationError,
     GmailService,
     google_credentials_from_token_json,
 )
@@ -90,13 +89,7 @@ def get_gmail_service(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Google OAuth token missing. Please sign in again.",
         )
-    try:
-        creds = google_credentials_from_token_json(current_user.google_oauth_token)
-    except GmailAuthenticationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
-        ) from exc
+    creds = google_credentials_from_token_json(current_user.google_oauth_token)
     return GmailService(credentials=creds)
 
 
@@ -109,13 +102,7 @@ def get_calendar_service(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Google OAuth token missing. Please sign in again.",
         )
-    try:
-        creds = google_credentials_from_token_json(current_user.google_oauth_token)
-    except GmailAuthenticationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
-        ) from exc
+    creds = google_credentials_from_token_json(current_user.google_oauth_token)
     return GoogleCalendarService(credentials=creds)
 
 

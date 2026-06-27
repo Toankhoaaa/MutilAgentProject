@@ -25,8 +25,6 @@ export default function SchedulesPage() {
   const { data: events, isLoading, error: fetchError, mutate } =
     useSWR<ScheduleEvent[]>("/emails/scheduled-events", fetcher);
 
-  if (authError) return null;
-
   const handleSelect = useCallback((event: ScheduleEvent) => {
     setSelected(event);
   }, []);
@@ -35,6 +33,8 @@ export default function SchedulesPage() {
     setToast({ message, type });
     setTimeout(() => setToast(null), 5000);
   }, []);
+
+  if (authError) return null;
 
   const handleConfirm = async () => {
     if (!selected) return;

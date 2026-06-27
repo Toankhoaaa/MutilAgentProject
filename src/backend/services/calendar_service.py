@@ -15,7 +15,10 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
-CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+CALENDAR_SCOPE = (
+    "https://www.googleapis.com/auth/calendar.readonly "
+    "https://www.googleapis.com/auth/calendar.events"
+)
 
 # Vietnam Standard Time (no DST — always UTC+7).
 _VN_TZ = "Asia/Ho_Chi_Minh"

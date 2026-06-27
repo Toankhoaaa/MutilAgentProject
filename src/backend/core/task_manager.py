@@ -10,9 +10,15 @@ from __future__ import annotations
 ACTIVE_TASKS: dict[str, dict] = {}
 
 
-def register_task(task_id: str) -> None:
-    """Mark a task as active and not yet cancelled."""
-    ACTIVE_TASKS[task_id] = {"is_cancelled": False}
+def register_task(task_id: str, user_id: str) -> None:
+    """Mark a task as active, recording the owning user."""
+    ACTIVE_TASKS[task_id] = {"is_cancelled": False, "user_id": user_id}
+
+
+def get_task_owner(task_id: str) -> str | None:
+    """Return the user_id that owns this task, or None if not found."""
+    entry = ACTIVE_TASKS.get(task_id)
+    return entry["user_id"] if entry is not None else None
 
 
 def cancel_task(task_id: str) -> bool:

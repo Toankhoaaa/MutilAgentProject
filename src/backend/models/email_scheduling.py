@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql.sqltypes import Uuid
 
@@ -13,9 +13,15 @@ from backend.models.base import Base
 
 class EmailScheduling(Base):
     __tablename__ = "email_schedulings"
-    __table_args__ = (Index("idx_email_schedulings_created_at", "created_at"),)
+    __table_args__ = (
+        Index("idx_email_schedulings_created_at", "created_at"),
+        Index("idx_email_schedulings_user_id", "user_id"),
+        UniqueConstraint("user_id", "gmail_message_id", name="uq_user_gmail_scheduling"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=False)
+    gmail_message_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     event_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     start_datetime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_datetime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

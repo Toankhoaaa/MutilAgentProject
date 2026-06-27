@@ -16,15 +16,18 @@ from backend.core import task_manager
 from backend.core.websocket_manager import manager
 from backend.models.agent_run import AgentRun
 from backend.models.audit_log import AuditLog
+from backend.models.classification import Classification
 from backend.models.configuration import Configuration
+from backend.models.task import Task as _TaskModel
 from backend.models.user import User
 from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutput, SchedulingOutput, SecurityAnalysisOutput
 from backend.models.email_rule import EmailRule
 from backend.services.agents.classifier_agent import EmailClassifierAgent
 from backend.services.agents.privacy_agent import PrivacyAgent
 from backend.services.agents.rag_agent import RagAgent
-from backend.services.agents.response_agent import EmailResponseAgent
+from backend.services.agents.response_agent import EmailResponseAgent, ResponseAgentSkippedError
 from backend.services.agents.scheduling_agent import EmailSchedulingAgent
+from backend.services.agents.analysis_agent import EmailAnalysisAgent
 from backend.services.agents.security_agent import EmailSecurityAgent
 from backend.services.calendar_service import CalendarAPIError, GoogleCalendarService
 from backend.services.gmail_service import GmailService
@@ -41,6 +44,16 @@ _AGENT_SECURITY = "SecurityAgent"
 _CONFIG_KEY_AGENT_TONE = "agent_tone"
 _CONFIG_KEY_USER_SIGNATURE = "user_signature"
 _DEFAULT_AGENT_TONE = "professional"
+
+_AGENT_TASK_SUGGESTOR = "TaskSuggestor"
+_TASK_ELIGIBLE_CATEGORIES: frozenset = frozenset({
+    EmailCategory.URGENT,
+    EmailCategory.NEED_REPLY,
+    EmailCategory.IMPORTANT,
+})
+_TASK_MIN_CONFIDENCE: float = 0.7
+_TASK_MIN_ITEM_LEN: int = 5
+_TASK_MAX_PER_EMAIL: int = 5
 
 
 class EmailOrchestrator:
@@ -65,6 +78,7 @@ class EmailOrchestrator:
         calendar_service: GoogleCalendarService | None = None,
         task_id: str | None = None,
         security_agent: EmailSecurityAgent | None = None,
+        analysis_agent: EmailAnalysisAgent | None = None,
     ) -> None:
         self._db = db
         self._gmail = gmail_service
@@ -79,6 +93,7 @@ class EmailOrchestrator:
         self._task_id = task_id
         self._rule_engine = RuleEngine()
         self._security = security_agent or EmailSecurityAgent()
+        self._analysis = analysis_agent or EmailAnalysisAgent()
 
     async def process_new_emails(self, limit: int = 5) -> dict[str, Any]:
         """
@@ -151,11 +166,14 @@ class EmailOrchestrator:
                     )
                     security_blocked = security_result.risk_level == "high" or not security_result.is_safe
                     if security_blocked:
-                        await manager.broadcast({
-                            "type": "SECURITY_ALERT",
-                            "risk_level": "high",
-                            "warnings": security_result.warnings,
-                        })
+                        await manager.broadcast(
+                            {
+                                "type": "SECURITY_ALERT",
+                                "risk_level": "high",
+                                "warnings": security_result.warnings,
+                            },
+                            target_user_id=user_id,
+                        )
                         self._audit(
                             user_id=user_id,
                             agent_name=_AGENT_SECURITY,
@@ -181,65 +199,72 @@ class EmailOrchestrator:
                             },
                         )
 
-                    rule_match = self._rule_engine.evaluate(raw_email, list(user_rules))
                     skip_draft = False
+                    rule_match = None
+                    # Security block has absolute precedence over user rules.
+                    if not security_blocked:
+                        rule_match = self._rule_engine.evaluate(raw_email, list(user_rules))
 
-                    if rule_match is not None:
-                        self._audit(
-                            user_id=user_id,
-                            agent_name=_AGENT_RULE_ENGINE,
-                            action="rule_matched",
-                            status="success",
-                            details={
-                                "gmail_message_id": gmail_message_id,
-                                "rule_id": str(rule_match.rule.id),
-                                "rule_name": rule_match.rule.name,
-                                "action": rule_match.action,
-                            },
-                        )
-                        if rule_match.action == "trash":
-                            if self._gmail is not None and gmail_message_id:
-                                await self._gmail.trash_message(gmail_message_id)
-                            self._db.commit()
-                            summary["processed"] += 1
-                            summary["processed_emails"].append({
-                                "gmail_message_id": gmail_message_id,
-                                "subject": raw_email.get("subject"),
-                                "sender": raw_email.get("sender"),
-                                "category": "trashed_by_rule",
-                                "priority_score": None,
-                                "summary": None,
-                                "confidence": None,
-                                "draft_subject": None,
-                                "has_draft": False,
-                            })
-                            continue
-                        elif rule_match.action == "skip_ai":
-                            self._db.commit()
-                            summary["processed"] += 1
-                            summary["processed_emails"].append({
-                                "gmail_message_id": gmail_message_id,
-                                "subject": raw_email.get("subject"),
-                                "sender": raw_email.get("sender"),
-                                "category": "skipped_by_rule",
-                                "priority_score": None,
-                                "summary": None,
-                                "confidence": None,
-                                "draft_subject": None,
-                                "has_draft": False,
-                            })
-                            continue
-                        elif rule_match.action == "alert":
-                            await manager.broadcast({
-                                "type": "NEW_URGENT_EMAIL",
-                                "subject": raw_email.get("subject"),
-                                "summary": rule_match.action_value or "Alert triggered by email rule.",
-                            })
-                        elif rule_match.action == "skip_draft":
-                            skip_draft = True
+                        if rule_match is not None:
+                            self._audit(
+                                user_id=user_id,
+                                agent_name=_AGENT_RULE_ENGINE,
+                                action="rule_matched",
+                                status="success",
+                                details={
+                                    "gmail_message_id": gmail_message_id,
+                                    "rule_id": str(rule_match.rule.id),
+                                    "rule_name": rule_match.rule.name,
+                                    "action": rule_match.action,
+                                },
+                            )
+                            if rule_match.action == "trash":
+                                if self._gmail is not None and gmail_message_id:
+                                    await self._gmail.trash_message(gmail_message_id)
+                                self._db.commit()
+                                summary["processed"] += 1
+                                summary["processed_emails"].append({
+                                    "gmail_message_id": gmail_message_id,
+                                    "subject": raw_email.get("subject"),
+                                    "sender": raw_email.get("sender"),
+                                    "category": "trashed_by_rule",
+                                    "priority_score": None,
+                                    "summary": None,
+                                    "confidence": None,
+                                    "draft_subject": None,
+                                    "has_draft": False,
+                                })
+                                continue
+                            elif rule_match.action == "skip_ai":
+                                self._db.commit()
+                                summary["processed"] += 1
+                                summary["processed_emails"].append({
+                                    "gmail_message_id": gmail_message_id,
+                                    "subject": raw_email.get("subject"),
+                                    "sender": raw_email.get("sender"),
+                                    "category": "skipped_by_rule",
+                                    "priority_score": None,
+                                    "summary": None,
+                                    "confidence": None,
+                                    "draft_subject": None,
+                                    "has_draft": False,
+                                })
+                                continue
+                            elif rule_match.action == "alert":
+                                await manager.broadcast(
+                                    {
+                                        "type": "NEW_URGENT_EMAIL",
+                                        "subject": raw_email.get("subject"),
+                                        "summary": rule_match.action_value or "Alert triggered by email rule.",
+                                    },
+                                    target_user_id=user_id,
+                                )
+                            elif rule_match.action == "skip_draft":
+                                skip_draft = True
 
                     self._check_cancelled()
                     _forced_by_rule = rule_match is not None and rule_match.action == "force_category"
+                    _from_cache = False
                     if security_blocked:
                         classification_output = EmailClassificationOutput.model_construct(
                             category=EmailCategory.SPAM,
@@ -263,10 +288,38 @@ class EmailOrchestrator:
                             confidence=1.0,
                         )
                     else:
-                        classification_output, classify_ms = await self._classify_email(raw_email)
-                        llm_calls_count += 1
-                        llm_total_time_ms += classify_ms or 0
+                        _cached_cls = (
+                            self._db.scalar(
+                                select(Classification).where(
+                                    Classification.gmail_message_id == gmail_message_id,
+                                    Classification.user_id == user_id,
+                                )
+                            ) if gmail_message_id else None
+                        )
+                        if _cached_cls:
+                            try:
+                                _cached_cat = EmailCategory(_cached_cls.category)
+                            except (ValueError, TypeError):
+                                _cached_cat = EmailCategory.IMPORTANT
+                            classification_output = EmailClassificationOutput.model_construct(
+                                category=_cached_cat,
+                                priority_score=_cached_cls.priority_score or 0,
+                                summary=_cached_cls.summary or "",
+                                deadline=None,
+                                confidence=_cached_cls.confidence or 0.0,
+                            )
+                            _from_cache = True
+                            logger.debug("classify cache hit (batch): gmail_message_id=%s", gmail_message_id)
+                        else:
+                            classification_output, classify_ms = await self._classify_email(raw_email)
+                            llm_calls_count += 1
+                            llm_total_time_ms += classify_ms or 0
 
+                    _audit_source: dict = {}
+                    if _forced_by_rule:
+                        _audit_source = {"source": "rule_engine"}
+                    elif _from_cache:
+                        _audit_source = {"source": "cache"}
                     self._audit(
                         user_id=user_id,
                         agent_name=_AGENT_CLASSIFIER,
@@ -277,9 +330,13 @@ class EmailOrchestrator:
                             "category": classification_output.category.value,
                             "priority_score": classification_output.priority_score,
                             "confidence": classification_output.confidence,
-                            **({"source": "rule_engine"} if _forced_by_rule else {}),
+                            **_audit_source,
                         },
                     )
+
+                    thread_id = raw_email.get("thread_id") or ""
+                    if not _from_cache:
+                        self._upsert_classification(gmail_message_id, thread_id, classification_output)
 
                     self._check_cancelled()
                     scheduling_result = await self._handle_scheduling(raw_email, user_id, security_blocked=security_blocked)
@@ -304,7 +361,8 @@ class EmailOrchestrator:
                                 "type": "NEW_URGENT_EMAIL",
                                 "subject": raw_email.get("subject"),
                                 "summary": classification_output.summary,
-                            }
+                            },
+                            target_user_id=user_id,
                         )
 
                     email_detail: dict[str, Any] = {
@@ -325,29 +383,47 @@ class EmailOrchestrator:
                     self._check_cancelled()
                     if not skip_draft and EmailResponseAgent.is_eligible(classification_output.category):
                         rag_context = self._rag.retrieve(
-                            raw_email.get("body") or raw_email.get("snippet") or ""
+                            raw_email.get("body") or raw_email.get("snippet") or "",
+                            user_id=str(self._user_id) if self._user_id else None,
                         )
-                        draft_gmail_id, draft_subject, draft_ms = await self._create_draft(
-                            raw_email=raw_email,
-                            classification=classification_output,
-                            rag_context=rag_context,
-                        )
-                        llm_calls_count += 1
-                        llm_total_time_ms += draft_ms or 0
-                        summary["drafts_created"] += 1
-                        email_detail["has_draft"] = True
-                        email_detail["draft_subject"] = draft_subject
-                        self._audit(
-                            user_id=user_id,
-                            agent_name=_AGENT_RESPONSE,
-                            action="create_draft",
-                            status="success",
-                            details={
-                                "gmail_message_id": gmail_message_id,
-                                "category": classification_output.category.value,
-                                "draft_gmail_id": draft_gmail_id,
-                            },
-                        )
+                        try:
+                            draft_gmail_id, draft_subject, draft_ms = await self._create_draft(
+                                raw_email=raw_email,
+                                classification=classification_output,
+                                rag_context=rag_context,
+                            )
+                            llm_calls_count += 1
+                            llm_total_time_ms += draft_ms or 0
+                            summary["drafts_created"] += 1
+                            email_detail["has_draft"] = True
+                            email_detail["draft_subject"] = draft_subject
+                            self._audit(
+                                user_id=user_id,
+                                agent_name=_AGENT_RESPONSE,
+                                action="create_draft",
+                                status="success",
+                                details={
+                                    "gmail_message_id": gmail_message_id,
+                                    "category": classification_output.category.value,
+                                    "draft_gmail_id": draft_gmail_id,
+                                },
+                            )
+                        except Exception as draft_exc:
+                            logger.warning(
+                                "Draft creation failed for %s: %s — email processed without draft.",
+                                gmail_message_id,
+                                draft_exc,
+                            )
+                            self._audit(
+                                user_id=user_id,
+                                agent_name=_AGENT_RESPONSE,
+                                action="create_draft",
+                                status="failed",
+                                details={
+                                    "gmail_message_id": gmail_message_id,
+                                    "error": str(draft_exc),
+                                },
+                            )
                     else:
                         self._audit(
                             user_id=user_id,
@@ -361,6 +437,24 @@ class EmailOrchestrator:
                         )
 
                     self._db.commit()
+
+                    # ── Suggest tasks (best-effort — never breaks pipeline) ──────────
+                    try:
+                        tasks_n = await self._suggest_tasks_for_email(
+                            raw_email=raw_email,
+                            classification=classification_output,
+                            user_id=user_id,
+                        )
+                        if tasks_n > 0:
+                            self._db.commit()
+                    except Exception as task_exc:
+                        logger.warning(
+                            "Task suggestion failed for %s: %s — pipeline continues.",
+                            gmail_message_id,
+                            task_exc,
+                        )
+                        self._db.rollback()
+
                     summary["processed"] += 1
                     summary["processed_emails"].append(email_detail)
 
@@ -435,9 +529,12 @@ class EmailOrchestrator:
         return summary
 
     async def process_one_stateless(
-        self, raw_email: dict[str, Any], tone_override: str | None = None
+        self, raw_email: dict[str, Any], tone_override: str | None = None, force_draft: bool = False
     ) -> dict[str, Any]:
-        """Classify a single email and optionally draft a reply with no DB writes."""
+        """Classify a single email and optionally draft a reply.
+
+        Email content is not persisted. AuditLog entries are written for observability.
+        """
         self._check_cancelled()
         raw_email = self._privacy.mask_email_dict(raw_email)
 
@@ -447,6 +544,34 @@ class EmailOrchestrator:
             sender=raw_email.get("sender"),
         )
         security_blocked = security_result.risk_level == "high" or not security_result.is_safe
+
+        if security_blocked:
+            self._audit(
+                user_id=self._user_id,
+                agent_name=_AGENT_SECURITY,
+                action="security_check",
+                status="blocked",
+                details={
+                    "subject": raw_email.get("subject"),
+                    "sender": raw_email.get("sender"),
+                    "risk_level": security_result.risk_level,
+                    "is_safe": security_result.is_safe,
+                    "warnings": security_result.warnings,
+                },
+            )
+        elif security_result.risk_level == "medium":
+            self._audit(
+                user_id=self._user_id,
+                agent_name=_AGENT_SECURITY,
+                action="security_check",
+                status="warning",
+                details={
+                    "subject": raw_email.get("subject"),
+                    "sender": raw_email.get("sender"),
+                    "risk_level": security_result.risk_level,
+                    "warnings": security_result.warnings,
+                },
+            )
 
         self._check_cancelled()
         if security_blocked:
@@ -459,6 +584,20 @@ class EmailOrchestrator:
             ), None
         else:
             classification, _ = await self._classify_email(raw_email)
+
+        self._audit(
+            user_id=self._user_id,
+            agent_name=_AGENT_CLASSIFIER,
+            action="classify_email",
+            status="success",
+            details={
+                "subject": raw_email.get("subject"),
+                "category": classification.category.value,
+                "priority_score": classification.priority_score,
+                "confidence": classification.confidence,
+                "security_blocked": security_blocked,
+            },
+        )
 
         result: dict[str, Any] = {
             "category": classification.category.value,
@@ -473,24 +612,63 @@ class EmailOrchestrator:
         }
 
         self._check_cancelled()
-        if EmailResponseAgent.is_eligible(classification.category):
+        if force_draft or EmailResponseAgent.is_eligible(classification.category):
             tone, signature = self._load_agent_customization()
             if tone_override:
                 tone = tone_override
             rag_context = self._rag.retrieve(
-                raw_email.get("body") or raw_email.get("snippet") or ""
+                raw_email.get("body") or raw_email.get("snippet") or "",
+                user_id=str(self._user_id) if self._user_id else None,
             )
-            reply = await self._response.draft_reply(
-                email_subject=raw_email.get("subject") or "",
-                email_body=raw_email.get("body") or "",
-                classification=classification,
-                tone=tone,
-                signature=signature,
-                rag_context=rag_context,
+            try:
+                reply = await self._response.draft_reply(
+                    email_subject=raw_email.get("subject") or "",
+                    email_body=raw_email.get("body") or "",
+                    classification=classification,
+                    tone=tone,
+                    signature=signature,
+                    rag_context=rag_context,
+                    on_demand=force_draft,
+                )
+                result["draft_content"] = reply.body_content
+                result["draft_subject"] = reply.subject
+                self._audit(
+                    user_id=self._user_id,
+                    agent_name=_AGENT_RESPONSE,
+                    action="create_draft",
+                    status="success",
+                    details={
+                        "subject": raw_email.get("subject"),
+                        "category": classification.category.value,
+                        "draft_subject": reply.subject,
+                    },
+                )
+            except ResponseAgentSkippedError as exc:
+                logger.info("Response agent skipped (auto pipeline): %s", exc)
+                self._audit(
+                    user_id=self._user_id,
+                    agent_name=_AGENT_RESPONSE,
+                    action="skip_auto_reply",
+                    status="skipped",
+                    details={
+                        "subject": raw_email.get("subject"),
+                        "category": classification.category.value,
+                        "reason": str(exc),
+                    },
+                )
+        else:
+            self._audit(
+                user_id=self._user_id,
+                agent_name=_AGENT_ORCHESTRATOR,
+                action="skip_auto_reply",
+                status="skipped",
+                details={
+                    "subject": raw_email.get("subject"),
+                    "category": classification.category.value,
+                },
             )
-            result["draft_content"] = reply.body_content
-            result["draft_subject"] = reply.subject
 
+        self._db.commit()
         return result
 
     async def _handle_scheduling(
@@ -624,6 +802,11 @@ class EmailOrchestrator:
 
         user = self._db.scalar(select(User).where(User.is_active.is_(True)).limit(1))
         if user is not None:
+            logger.warning(
+                "EmailOrchestrator instantiated without user_id — falling back to first active user (%s)."
+                " This should not happen in production; always pass user_id explicitly.",
+                user.id,
+            )
             self._user_id = user.id
             return user.id
 
@@ -660,6 +843,7 @@ class EmailOrchestrator:
     def _start_agent_run(self, triggered_by: str = "SYSTEM") -> AgentRun:
         """Create a RUNNING batch record in ``agent_runs``."""
         run = AgentRun(
+            user_id=self._user_id,
             run_type="BATCH_PROCESSING",
             triggered_by=triggered_by,
             status="RUNNING",
@@ -751,6 +935,129 @@ class EmailOrchestrator:
             details=details,
         )
         self._db.add(log_entry)
+
+    def _upsert_classification(
+        self,
+        gmail_message_id: str,
+        thread_id: str,
+        result: EmailClassificationOutput,
+    ) -> None:
+        """Insert or update a classification cache row keyed by gmail_message_id."""
+        if not gmail_message_id:
+            return
+        existing = self._db.scalar(
+            select(Classification).where(
+                Classification.gmail_message_id == gmail_message_id,
+                Classification.user_id == self._user_id,
+            )
+        )
+        if existing:
+            existing.thread_id = thread_id
+            existing.category = result.category.value
+            existing.priority_score = result.priority_score
+            existing.summary = result.summary
+            existing.confidence = result.confidence
+        else:
+            self._db.add(Classification(
+                user_id=self._user_id,
+                gmail_message_id=gmail_message_id,
+                thread_id=thread_id,
+                category=result.category.value,
+                priority_score=result.priority_score,
+                summary=result.summary,
+                confidence=result.confidence,
+            ))
+
+    async def _suggest_tasks_for_email(
+        self,
+        raw_email: dict[str, Any],
+        classification: EmailClassificationOutput,
+        user_id: uuid.UUID,
+    ) -> int:
+        """
+        4-tier filter + dedup, then create suggested tasks from email action items.
+        Returns task count created; 0 if filtered out or already exists.
+        raw_email must already be privacy-masked before this call.
+        """
+        # Tầng 1 — category
+        if classification.category not in _TASK_ELIGIBLE_CATEGORIES:
+            return 0
+
+        # Tầng 2 — confidence
+        if (classification.confidence or 0.0) < _TASK_MIN_CONFIDENCE:
+            return 0
+
+        gmail_message_id = raw_email.get("gmail_message_id", "")
+        if not gmail_message_id:
+            return 0
+
+        # Chống trùng: đã từng sinh task từ email này (bất kỳ status) → bỏ qua
+        existing = self._db.scalar(
+            select(_TaskModel).where(
+                _TaskModel.user_id == user_id,
+                _TaskModel.source_email_id == gmail_message_id,
+            ).limit(1)
+        )
+        if existing is not None:
+            logger.debug(
+                "Task suggestion skipped for %s — tasks already exist (status=%s).",
+                gmail_message_id,
+                existing.status,
+            )
+            return 0
+
+        # Lấy action_items từ analysis agent (đã mask, an toàn)
+        analysis = await self._analysis.analyze(
+            email_subject=raw_email.get("subject") or "",
+            email_body=raw_email.get("body") or raw_email.get("snippet") or "",
+            email_sender=raw_email.get("sender"),
+        )
+
+        # Tầng 3 — bỏ item rỗng / quá ngắn
+        raw_items = [
+            item.strip()
+            for item in (analysis.action_items or [])
+            if item and len(item.strip()) >= _TASK_MIN_ITEM_LEN
+        ]
+        if not raw_items:
+            return 0
+
+        # Tầng 4 — cap số lượng
+        items = raw_items[:_TASK_MAX_PER_EMAIL]
+
+        priority = min(max(classification.priority_score or 3, 1), 5)
+        deadline = self._parse_deadline(classification.deadline)
+        thread_id: str | None = raw_email.get("thread_id") or None
+
+        created = 0
+        for item in items:
+            self._db.add(_TaskModel(
+                user_id=user_id,
+                title=item[:255],
+                status="suggested",
+                source="ai_email",
+                source_email_id=gmail_message_id,
+                source_thread_id=thread_id,
+                priority=priority,
+                deadline=deadline,
+            ))
+            created += 1
+
+        if created:
+            self._audit(
+                user_id=user_id,
+                agent_name=_AGENT_TASK_SUGGESTOR,
+                action="suggest_tasks",
+                status="success",
+                details={
+                    "gmail_message_id": gmail_message_id,
+                    "tasks_created": created,
+                    "category": classification.category.value,
+                    "confidence": classification.confidence,
+                },
+            )
+
+        return created
 
     @staticmethod
     def _parse_deadline(deadline: str | date | None) -> date | None:

@@ -8,6 +8,7 @@ interface AnalyzeEmailMessage {
   body: string;
   sender: string;
   token: string;
+  gmail_message_id?: string | null;
 }
 
 interface SaveAttachmentMessage {
@@ -21,6 +22,7 @@ interface SaveAttachmentMessage {
 
 interface KeepaliveMessage {
   type: 'KEEPALIVE';
+  token?: string;
 }
 
 type IncomingMessage = AnalyzeEmailMessage | SaveAttachmentMessage | KeepaliveMessage;
@@ -29,10 +31,13 @@ type IncomingMessage = AnalyzeEmailMessage | SaveAttachmentMessage | KeepaliveMe
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let cachedToken: string | null = null;
 
-function connectWS(): void {
+function connectWS(token?: string): void {
+  if (token) cachedToken = token;
+  if (!cachedToken) return; // no token yet — wait for first KEEPALIVE or authenticated message
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  ws = new WebSocket('ws://localhost:8000/ws/notifications');
+  ws = new WebSocket(`ws://localhost:8000/ws/notifications?token=${encodeURIComponent(cachedToken)}`);
 
   ws.onopen = () => {
     if (reconnectTimer !== null) {
@@ -78,20 +83,21 @@ connectWS();
 chrome.runtime.onMessage.addListener(
   (message: IncomingMessage, _sender, sendResponse) => {
     if (message.type === 'KEEPALIVE') {
-      connectWS();
+      connectWS(message.token);
       sendResponse({ ok: true });
       return true;
     }
 
     if (message.type === 'ANALYZE_EMAIL') {
-      const { subject, body, sender, token } = message;
+      const { subject, body, sender, token, gmail_message_id } = message;
+      connectWS(token);
       fetch(`${API_BASE}/emails/analyze`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ subject, body, sender }),
+        body: JSON.stringify({ subject, body, sender, ...(gmail_message_id ? { gmail_message_id } : {}) }),
       })
         .then((res) => {
           if (!res.ok) {
@@ -107,6 +113,7 @@ chrome.runtime.onMessage.addListener(
 
     if (message.type === 'SAVE_ATTACHMENT') {
       const { downloadUrl, filename, sourceEmail, notes, token } = message;
+      connectWS(token);
       // Fetch attachment bytes then POST as multipart to the knowledge upload endpoint.
       // Running in the service worker bypasses the HTTPS→HTTP mixed-content restriction.
       fetch(downloadUrl)

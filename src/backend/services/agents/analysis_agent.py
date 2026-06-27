@@ -249,26 +249,6 @@ class EmailAnalysisAgent:
             allow_delegation=False,
         )
 
-        self._task = Task(
-            description=_ANALYSIS_TASK_TEMPLATE,
-            expected_output=(
-                "A single JSON object with keys: detected_language (ISO 639-1 string), "
-                "summary (list of 1-3 Vietnamese bullet strings, ≤80 words total), "
-                "translation (Vietnamese string or null), "
-                "action_items (list of Vietnamese action strings, may be empty), "
-                "sentiment ('Positive' | 'Neutral' | 'Negative'). "
-                "No markdown fences or extra text."
-            ),
-            agent=self._agent,
-            output_pydantic=EmailAnalysisOutput,
-        )
-
-        self._crew = Crew(
-            agents=[self._agent],
-            tasks=[self._task],
-            process=Process.sequential,
-            verbose=False,
-        )
 
     async def analyze(
         self,
@@ -288,32 +268,61 @@ class EmailAnalysisAgent:
             :class:`EmailAnalysisOutput` with all five analysis fields populated.
         """
         try:
-            return await asyncio.to_thread(
-                self._analyze_with_crew, email_subject, email_body, email_sender
-            )
+            return await self._analyze_with_crew(email_subject, email_body, email_sender)
         except (AnalysisParseError, AnalysisAgentError, LLMServiceError) as exc:
             logger.warning("CrewAI analysis failed, using GeminiService fallback: %s", exc)
+        try:
             return await self._analyze_with_gemini(email_subject, email_body, email_sender)
+        except Exception as exc:
+            logger.exception("GeminiService analysis fallback failed: %s", exc)
+            return EmailAnalysisOutput(
+                detected_language="vi",
+                summary=["Không thể phân tích email lúc này. Vui lòng thử lại."],
+                translation=None,
+                action_items=[],
+                sentiment="Neutral",
+            )
 
-    def _analyze_with_crew(
+    async def _analyze_with_crew(
         self,
         email_subject: str,
         email_body: str,
         email_sender: str | None,
     ) -> EmailAnalysisOutput:
-        """Run the CrewAI workflow synchronously (called from asyncio.to_thread)."""
-        try:
-            result = self._crew.kickoff(
-                inputs={
-                    "few_shot": _FEW_SHOT_EXAMPLES,
-                    "email_subject": email_subject,
-                    "email_body": email_body,
-                    "email_sender": email_sender or "unknown",
-                }
+        """Create a fresh Crew per call; run via asyncio.to_thread to avoid executor conflicts."""
+        inputs = {
+            "few_shot": _FEW_SHOT_EXAMPLES,
+            "email_subject": email_subject,
+            "email_body": email_body,
+            "email_sender": email_sender or "unknown",
+        }
+
+        def _run() -> Any:
+            task = Task(
+                description=_ANALYSIS_TASK_TEMPLATE,
+                expected_output=(
+                    "A single JSON object with keys: detected_language (ISO 639-1 string), "
+                    "summary (list of 1-3 Vietnamese bullet strings, ≤80 words total), "
+                    "translation (Vietnamese string or null), "
+                    "action_items (list of Vietnamese action strings, may be empty), "
+                    "sentiment ('Positive' | 'Neutral' | 'Negative'). "
+                    "No markdown fences or extra text."
+                ),
+                agent=self._agent,
+                output_pydantic=EmailAnalysisOutput,
             )
+            crew = Crew(
+                agents=[self._agent],
+                tasks=[task],
+                process=Process.sequential,
+                verbose=False,
+            )
+            return crew.kickoff(inputs=inputs)
+
+        try:
+            result = await asyncio.to_thread(_run)
         except Exception as exc:
             raise AnalysisAgentError(f"CrewAI kickoff failed: {exc}") from exc
-
         return self._parse_crew_result(result)
 
     async def _analyze_with_gemini(

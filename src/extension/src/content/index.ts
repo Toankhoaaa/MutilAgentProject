@@ -214,7 +214,10 @@ chrome.runtime.onMessage.addListener((msg: { type: string; content?: string; lan
 });
 
 setInterval(() => {
-  chrome.runtime.sendMessage({ type: 'KEEPALIVE' }).catch(() => {});
+  void chrome.storage.local.get('ai_reply_token').then((stored) => {
+    const token = stored['ai_reply_token'] as string | undefined;
+    chrome.runtime.sendMessage({ type: 'KEEPALIVE', token }).catch(() => {});
+  });
 }, 20000);
 
 function debounce<T extends unknown[]>(fn: (...args: T) => void, ms: number) {
@@ -248,7 +251,8 @@ const BADGE_CONFIG: Record<string, { bg: string; fg: string; label: string }> = 
   spam:       { bg: '#80868b', fg: '#fff', label: '🚫 Spam' },
 };
 
-const badgeCache = new Map<string, { category: string; priority_score: number }>();
+const BADGE_CACHE_TTL_MS = 8 * 60 * 1000; // 8 minutes — allows re-classify after new message arrives
+const badgeCache = new Map<string, { category: string; priority_score: number; expiresAt: number }>();
 const pendingRows = new Map<string, InboxSDK.ThreadRowView>();
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -293,7 +297,7 @@ async function flushBatch(token: string): Promise<void> {
       await response.json() as Array<{ thread_id: string; category: string; priority_score: number; confidence: number }>;
 
     for (const result of results) {
-      badgeCache.set(result.thread_id, { category: result.category, priority_score: result.priority_score });
+      badgeCache.set(result.thread_id, { category: result.category, priority_score: result.priority_score, expiresAt: Date.now() + BADGE_CACHE_TTL_MS });
       const row = snapshot.get(result.thread_id);
       if (row) applyBadge(row, result.category);
     }
@@ -753,7 +757,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     if (!threadId) return;
 
     const cached = badgeCache.get(threadId);
-    if (cached) {
+    if (cached && Date.now() < cached.expiresAt) {
       applyBadge(row, cached.category);
       return;
     }
@@ -986,10 +990,15 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
           renderError('No API token saved. Open the extension popup and save your token first.');
           return;
         }
+        // Approach B: real message id only — no threadId fallback.
+        // threadId would merge distinct messages in the same thread, silently overwriting a different email's event.
+        const gmailMsgId = (latestMessage as { getMessageIDAsync?: () => Promise<string> }).getMessageIDAsync
+          ? await (latestMessage as { getMessageIDAsync: () => Promise<string> }).getMessageIDAsync()
+          : null;
         // Route through service worker to avoid Mixed-Content block (HTTPS page → HTTP localhost)
         const response = await new Promise<{ ok: boolean; data?: AnalyzeResponse; error?: string }>(
           (resolve) => chrome.runtime.sendMessage(
-            { type: 'ANALYZE_EMAIL', subject, body: body || '(no body)', sender, token },
+            { type: 'ANALYZE_EMAIL', subject, body: body || '(no body)', sender, token, gmail_message_id: gmailMsgId || null },
             resolve,
           ),
         );
@@ -1271,7 +1280,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
         void chrome.storage.local.get('ai_reply_token').then((stored) => {
           const token = stored['ai_reply_token'] as string | undefined;
           if (token) {
-            fetch(`${API_BASE}/tasks/${taskId}/cancel`, {
+            fetch(`${API_BASE}/pipeline/${taskId}/cancel`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${token}` },
             }).catch(() => {});
@@ -1324,14 +1333,20 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
           try {
             const threadId = composeView.getThreadID();
             const threadView = threadViews.get(threadId);
+            const messages = threadView?.getMessageViews() ?? [];
+            const latestMessage = messages[messages.length - 1];
 
-            const threadText = (threadView?.getMessageViews() ?? [])
+            const threadText = messages
               .filter((mv) => mv.isLoaded())
               .map((mv) => mv.getBodyElement()?.innerText ?? '')
               .filter(Boolean)
               .join('\n---\n');
 
             const subject = composeView.getSubject() || threadView?.getSubject() || '';
+            const sender = latestMessage?.getSender()?.emailAddress ?? '';
+            const gmailMsgId = (latestMessage as { getMessageIDAsync?: () => Promise<string> }).getMessageIDAsync
+              ? await (latestMessage as { getMessageIDAsync: () => Promise<string> }).getMessageIDAsync()
+              : null;
 
             const stored = await chrome.storage.local.get('ai_reply_token');
             const token = stored['ai_reply_token'] as string | undefined;
@@ -1344,15 +1359,26 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
 
             const { data } = await axios.post<ProcessEmailResult>(
               `${API_BASE}/emails/classify`,
-              { subject, text: threadText || '(no thread body)', sender: '', task_id: taskId, tone: selectedTone },
+              {
+                subject,
+                text: threadText || '(no thread body)',
+                sender,
+                task_id: taskId,
+                tone: selectedTone,
+                generate_draft: true,
+                ...(gmailMsgId ? { gmail_message_id: gmailMsgId } : {}),
+              },
               {
                 headers: { Authorization: `Bearer ${token}` },
                 signal: controller.signal,
               },
             );
 
-            const reply = data.draft_content ?? data.summary;
-            safeSetBodyHTML(composeView,`<p>${escapeHtml(reply)}</p>`);
+            if (!data.draft_content) {
+              safeSetBodyHTML(composeView, '<p><em>❌ AI không thể tạo nháp phản hồi cho email này.</em></p>');
+              return;
+            }
+            safeSetBodyHTML(composeView, `<p>${escapeHtml(data.draft_content)}</p>`);
           } catch (err) {
             if (axios.isCancel(err)) {
               safeSetBodyHTML(composeView,'<p><em>🛑 Đã hủy tạo nội dung.</em></p>');

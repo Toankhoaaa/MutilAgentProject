@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.api.dependencies import get_db
+from backend.api.dependencies import get_db, require_admin
 from backend.models.audit_log import AuditLog
+from backend.models.user import User
 from backend.schemas.api_schemas import AuditLogResponse, PaginatedResponse
 
 router = APIRouter(prefix="/audit", tags=["Audit Logs"])
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/audit", tags=["Audit Logs"])
 )
 def list_audit_logs(
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
     limit: int = Query(default=20, ge=1, le=200, description="Page size."),
     offset: int = Query(default=0, ge=0, description="Rows to skip."),
     status: str | None = Query(

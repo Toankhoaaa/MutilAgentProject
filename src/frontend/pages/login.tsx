@@ -15,7 +15,8 @@ export default function LoginPage() {
   }, [router]);
 
   const handleGoogleLogin = () => {
-    window.location.href = "/api/v1/auth/login";
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+    window.location.href = `${backendUrl}/api/v1/auth/login`;
   };
 
   return (

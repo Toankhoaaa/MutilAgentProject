@@ -113,6 +113,11 @@ export interface GmailEmailItem {
   snippet: string | null;
 }
 
+export interface GmailListResponse {
+  emails: GmailEmailItem[];
+  next_page_token: string | null;
+}
+
 export interface EventDetails {
   event_title: string | null;
   start_time: string | null;
@@ -269,6 +274,7 @@ export interface ScheduleEvent {
 
 export interface KnowledgeDocument {
   id: string;
+  user_id: string;
   filename: string;
   source_email: string | null;
   ai_summary: string | null;
@@ -284,10 +290,90 @@ export interface KnowledgeListResponse {
   total: number;
 }
 
+export interface Task {
+  id: string;
+  user_id: string;
+  title: string;
+  description: string | null;
+  status: "suggested" | "todo" | "in_progress" | "done" | "dismissed";
+  priority: number;
+  deadline: string | null;
+  remind_at: string | null;
+  source: "manual" | "ai_email" | "delegation";
+  source_email_id: string | null;
+  source_thread_id: string | null;
+  department: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface DelegationItem {
+  id: string;
+  delegation_id: string;
+  department_name: string | null;
+  department_id: string | null;
+  recipient_email: string | null;
+  work_items: string[];
+  draft_subject: string | null;
+  draft_body: string | null;
+  gmail_draft_id: string | null;
+  cc_emails: string | null;
+  bcc_emails: string | null;
+  confidence: number | null;
+  reason: string | null;
+  status: "draft" | "sent" | "dismissed";
+  sent_at: string | null;
+  already_sent_warning: boolean;
+}
+
+export interface DelegationSettings {
+  company_header: string | null;
+  signature: string | null;
+}
+
+export interface DelegationResult {
+  id: string;
+  user_id: string;
+  source_email_id: string;
+  source_thread_id: string | null;
+  original_subject: string | null;
+  status: string;
+  created_at: string;
+  items: DelegationItem[];
+}
+
+export interface DelegateEmailResponse {
+  is_delegation: boolean;
+  message: string | null;
+  delegation: DelegationResult | null;
+}
+
+export interface Department {
+  id: string;
+  user_id: string;
+  name: string;
+  email: string;
+  keywords: string | null;
+  created_at: string;
+}
+
 export type RuleField = 'sender' | 'subject' | 'body' | 'sender_domain';
 export type RuleOperator = 'contains' | 'equals' | 'starts_with' | 'ends_with' | 'not_contains' | 'regex';
 export type RuleAction = 'force_category' | 'skip_ai' | 'trash' | 'alert' | 'skip_draft';
 export type ForcedCategory = 'urgent' | 'important' | 'need_reply' | 'newsletter' | 'spam';
+
+export interface ProcessEmailResult {
+  category: string;
+  priority_score: number;
+  summary: string;
+  confidence: number;
+  draft_content: string | null;
+  draft_subject: string | null;
+  is_safe: boolean;
+  security_risk_level: string | null;
+  security_warnings: string[];
+}
 
 export interface EmailRule {
   id: string;

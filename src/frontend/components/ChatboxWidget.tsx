@@ -69,14 +69,14 @@ function BotAvatar() {
         height: 28,
         borderRadius: "50%",
         flexShrink: 0,
-        background: "linear-gradient(135deg, #EFF6FF 0%, #E0E7FF 100%)",
-        border: "1px solid #BFDBFE",
+        background: "var(--color-canvas-soft-2)",
+        border: "1px solid var(--color-hairline)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
       }}
     >
-      <svg width="13" height="13" fill="none" stroke="#6366F1" viewBox="0 0 24 24">
+      <svg width="13" height="13" fill="none" stroke="var(--color-body)" viewBox="0 0 24 24">
         <path
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -115,9 +115,7 @@ function MessageBubble({
           borderRadius: isUser
             ? "1rem 1rem 0.25rem 1rem"
             : "1rem 1rem 1rem 0.25rem",
-          background: isUser
-            ? "linear-gradient(135deg, #3B82F6 0%, #6366F1 100%)"
-            : "#F0F2F5",
+          background: isUser ? "var(--color-ink)" : "#F0F2F5",
           color: isUser ? "#fff" : "#1E293B",
           fontSize: "0.875rem",
           lineHeight: 1.55,
@@ -135,7 +133,7 @@ function MessageBubble({
                   display: "inline-block",
                   width: 2,
                   height: "1em",
-                  background: "#6366F1",
+                  background: "var(--color-ink)",
                   marginLeft: 2,
                   verticalAlign: "text-bottom",
                   animation: "blink 1s step-end infinite",
@@ -304,10 +302,9 @@ export default function ChatboxWidget() {
             width: "384px",
             maxHeight: "520px",
             background: "#ffffff",
-            border: "1px solid #E8EBF0",
-            borderRadius: "1rem",
-            boxShadow:
-              "0 8px 40px rgba(0,0,0,0.14), 0 2px 8px rgba(0,0,0,0.08)",
+            border: "1px solid var(--color-hairline)",
+            borderRadius: "0.75rem",
+            boxShadow: "0 4px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)",
             display: "flex",
             flexDirection: "column",
             zIndex: 199,
@@ -317,7 +314,8 @@ export default function ChatboxWidget() {
           {/* Header */}
           <div
             style={{
-              background: "linear-gradient(135deg, #3B82F6 0%, #6366F1 100%)",
+              background: "var(--color-canvas)",
+              borderBottom: "1px solid var(--color-hairline)",
               padding: "0.875rem 1rem",
               display: "flex",
               alignItems: "center",
@@ -330,7 +328,7 @@ export default function ChatboxWidget() {
                 width: 32,
                 height: 32,
                 borderRadius: "50%",
-                background: "rgba(255,255,255,0.18)",
+                background: "var(--color-canvas-soft-2)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -356,8 +354,8 @@ export default function ChatboxWidget() {
             <div style={{ flex: 1 }}>
               <p
                 style={{
-                  color: "#fff",
-                  fontWeight: 700,
+                  color: "var(--color-ink)",
+                  fontWeight: 600,
                   fontSize: "0.875rem",
                   margin: 0,
                   lineHeight: 1.2,
@@ -367,7 +365,7 @@ export default function ChatboxWidget() {
               </p>
               <p
                 style={{
-                  color: "rgba(255,255,255,0.75)",
+                  color: "var(--color-mute)",
                   fontSize: "0.6875rem",
                   margin: 0,
                   lineHeight: 1.3,
@@ -393,8 +391,8 @@ export default function ChatboxWidget() {
             <button
               onClick={handleClose}
               style={{
-                background: "rgba(255,255,255,0.15)",
-                border: "none",
+                background: "var(--color-canvas-soft-2)",
+                border: "1px solid var(--color-hairline)",
                 borderRadius: "0.375rem",
                 width: 28,
                 height: 28,
@@ -402,7 +400,7 @@ export default function ChatboxWidget() {
                 alignItems: "center",
                 justifyContent: "center",
                 cursor: "pointer",
-                color: "#fff",
+                color: "var(--color-mute)",
                 flexShrink: 0,
               }}
               title="Close"
@@ -451,8 +449,7 @@ export default function ChatboxWidget() {
                     height: 48,
                     borderRadius: "50%",
                     margin: "0 auto 0.75rem",
-                    background:
-                      "linear-gradient(135deg, #EFF6FF 0%, #E0E7FF 100%)",
+                    background: "var(--color-canvas-soft-2)",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -462,7 +459,7 @@ export default function ChatboxWidget() {
                     width="22"
                     height="22"
                     fill="none"
-                    stroke="#6366F1"
+                    stroke="var(--color-body)"
                     viewBox="0 0 24 24"
                   >
                     <path
@@ -521,11 +518,11 @@ export default function ChatboxWidget() {
                     alignItems: "center",
                     gap: "0.375rem",
                     padding: "0.3125rem 0.75rem",
-                    background: "rgba(99,102,241,0.08)",
-                    border: "1px solid rgba(99,102,241,0.18)",
+                    background: "var(--color-canvas-soft-2)",
+                    border: "1px solid var(--color-hairline)",
                     borderRadius: "9999px",
                     fontSize: "0.75rem",
-                    color: "#6366F1",
+                    color: "var(--color-mute)",
                     fontStyle: "italic",
                   }}
                 >
@@ -545,7 +542,7 @@ export default function ChatboxWidget() {
           <div
             style={{
               padding: "0.75rem",
-              borderTop: "1px solid #E8EBF0",
+              borderTop: "1px solid var(--color-hairline)",
               display: "flex",
               gap: "0.5rem",
               alignItems: "flex-end",
@@ -563,13 +560,13 @@ export default function ChatboxWidget() {
               style={{
                 flex: 1,
                 resize: "none",
-                border: "1px solid #E8EBF0",
-                borderRadius: "0.75rem",
+                border: "1px solid var(--color-hairline)",
+                borderRadius: "0.375rem",
                 padding: "0.5625rem 0.75rem",
                 fontSize: "0.875rem",
                 fontFamily: "inherit",
-                color: "#1E293B",
-                background: isLoading ? "#F8FAFC" : "#fff",
+                color: "var(--color-ink)",
+                background: isLoading ? "var(--color-canvas-soft-2)" : "#fff",
                 outline: "none",
                 lineHeight: 1.5,
                 maxHeight: "120px",
@@ -577,10 +574,10 @@ export default function ChatboxWidget() {
                 transition: "border-color 0.15s",
               }}
               onFocus={(e) => {
-                e.target.style.borderColor = "#3B82F6";
+                e.target.style.borderColor = "var(--color-ink)";
               }}
               onBlur={(e) => {
-                e.target.style.borderColor = "#E8EBF0";
+                e.target.style.borderColor = "var(--color-hairline)";
               }}
             />
             <button
@@ -591,11 +588,8 @@ export default function ChatboxWidget() {
                 height: 36,
                 borderRadius: "0.625rem",
                 border: "none",
-                background:
-                  isLoading || !input.trim()
-                    ? "#E2E8F0"
-                    : "linear-gradient(135deg, #3B82F6 0%, #6366F1 100%)",
-                color: isLoading || !input.trim() ? "#94A3B8" : "#fff",
+                background: isLoading || !input.trim() ? "var(--color-canvas-soft-2)" : "var(--color-ink)",
+                color: isLoading || !input.trim() ? "var(--color-mute)" : "#fff",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -634,17 +628,14 @@ export default function ChatboxWidget() {
           width: "52px",
           height: "52px",
           borderRadius: "50%",
-          background: isOpen
-            ? "#64748B"
-            : "linear-gradient(135deg, #3B82F6 0%, #6366F1 100%)",
-          border: "none",
-          color: "#fff",
+          background: isOpen ? "var(--color-canvas)" : "var(--color-ink)",
+          border: isOpen ? "1px solid var(--color-hairline)" : "none",
+          color: isOpen ? "var(--color-ink)" : "#fff",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           cursor: "pointer",
-          boxShadow:
-            "0 4px 20px rgba(59,130,246,0.4), 0 2px 8px rgba(0,0,0,0.12)",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.06)",
           zIndex: 200,
           transition: "all 0.2s",
           flexShrink: 0,

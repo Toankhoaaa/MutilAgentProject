@@ -241,24 +241,6 @@ class EmailSchedulingAgent:
             allow_delegation=False,
         )
 
-        self._task = Task(
-            description=_SCHEDULING_TASK_TEMPLATE,
-            expected_output=(
-                "A single JSON object with keys: is_meeting_request, action, "
-                "start_datetime, end_datetime, event_summary, suggested_reply. "
-                "action is a nested object {action_type, start_time, end_time, attendees} "
-                "or null. No markdown fences or extra text."
-            ),
-            agent=self._agent,
-            output_pydantic=SchedulingOutput,
-        )
-
-        self._crew = Crew(
-            agents=[self._agent],
-            tasks=[self._task],
-            process=Process.sequential,
-            verbose=False,
-        )
 
     async def extract_schedule(
         self,
@@ -282,14 +264,16 @@ class EmailSchedulingAgent:
         """
         now = current_time or _current_time_vn()
         try:
-            return await asyncio.to_thread(
-                self._extract_with_crew, email_subject, email_body, sender, now
-            )
+            return await self._extract_with_crew(email_subject, email_body, sender, now)
         except (SchedulingParseError, SchedulingAgentError, LLMServiceError) as exc:
             logger.warning(
                 "CrewAI scheduling extraction failed, using GeminiService fallback: %s", exc
             )
+        try:
             return await self._extract_with_gemini(email_subject, email_body, sender, now)
+        except Exception as exc:
+            logger.exception("GeminiService scheduling fallback failed: %s", exc)
+            return SchedulingOutput(is_meeting_request=False, suggested_reply="")
 
     async def suggest_alternatives(
         self,
@@ -331,28 +315,47 @@ class EmailSchedulingAgent:
 
     # ── Internal: CrewAI path ─────────────────────────────────────────────
 
-    def _extract_with_crew(
+    async def _extract_with_crew(
         self,
         email_subject: str,
         email_body: str,
         sender: str,
         current_time: str,
     ) -> SchedulingOutput:
-        """Run the CrewAI scheduling workflow synchronously."""
-        try:
-            result = self._crew.kickoff(
-                inputs={
-                    "few_shot": _FEW_SHOT_EXAMPLES,
-                    "current_time": current_time,
-                    "sender": sender,
-                    "email_subject": email_subject,
-                    "email_body": email_body,
-                    "meet_link": "{{meet_link}}",
-                }
+        """Create a fresh Crew per call; run via asyncio.to_thread to avoid executor conflicts."""
+        inputs = {
+            "few_shot": _FEW_SHOT_EXAMPLES,
+            "current_time": current_time,
+            "sender": sender,
+            "email_subject": email_subject,
+            "email_body": email_body,
+            "meet_link": "{{meet_link}}",
+        }
+
+        def _run() -> Any:
+            task = Task(
+                description=_SCHEDULING_TASK_TEMPLATE,
+                expected_output=(
+                    "A single JSON object with keys: is_meeting_request, action, "
+                    "start_datetime, end_datetime, event_summary, suggested_reply. "
+                    "action is a nested object {action_type, start_time, end_time, attendees} "
+                    "or null. No markdown fences or extra text."
+                ),
+                agent=self._agent,
+                output_pydantic=SchedulingOutput,
             )
+            crew = Crew(
+                agents=[self._agent],
+                tasks=[task],
+                process=Process.sequential,
+                verbose=False,
+            )
+            return crew.kickoff(inputs=inputs)
+
+        try:
+            result = await asyncio.to_thread(_run)
         except Exception as exc:
             raise SchedulingAgentError(f"CrewAI kickoff failed: {exc}") from exc
-
         output = self._parse_crew_result(result)
         return self._post_process(output)
 

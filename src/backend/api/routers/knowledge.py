@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
 
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -35,6 +37,7 @@ class KnowledgeDocumentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    user_id: uuid.UUID
     filename: str
     source_email: str | None
     ai_summary: str | None
@@ -42,6 +45,7 @@ class KnowledgeDocumentResponse(BaseModel):
     chroma_collection_id: str | None
     chunk_count: int | None
     status: str
+    error_message: str | None
     upload_date: datetime
 
 
@@ -69,6 +73,7 @@ def _process_document_bg(
     file_bytes: bytes,
     filename: str,
     suffix: str,
+    user_id: str,
 ) -> None:
     """Sync background task: parse → mask PII → chunk → embed → summarize → update DB."""
     db = SessionLocal()
@@ -83,11 +88,13 @@ def _process_document_bg(
         except Exception as exc:
             logger.exception("Text extraction failed for document %s", doc_id)
             doc.status = "failed"
+            doc.error_message = f"Text extraction failed: {exc}"
             db.commit()
             return
 
         if not text:
             doc.status = "failed"
+            doc.error_message = "Document appears to be empty or unreadable."
             db.commit()
             return
 
@@ -99,7 +106,7 @@ def _process_document_bg(
         safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", Path(filename).stem)[:50]
         chroma_prefix = f"{safe_stem}_{doc_id}"
         chunk_ids = [f"{chroma_prefix}_{i}" for i in range(len(chunks))]
-        metadatas = [{"document_id": str(doc_id), "filename": filename}] * len(chunks)
+        metadatas = [{"document_id": str(doc_id), "filename": filename, "user_id": user_id}] * len(chunks)
 
         ChromaService().add_documents(texts=chunks, ids=chunk_ids, metadatas=metadatas)
 
@@ -112,11 +119,12 @@ def _process_document_bg(
         doc.status = "ready"
         db.commit()
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Document processing failed for %s", doc_id)
         if doc is not None:
             try:
                 doc.status = "failed"
+                doc.error_message = str(exc)
                 db.commit()
             except Exception:
                 pass
@@ -159,7 +167,7 @@ async def upload_document(
     source_email: str | None = Form(None),
     notes: str | None = Form(None),
     db: Session = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
 ) -> KnowledgeDocumentResponse:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -171,7 +179,14 @@ async def upload_document(
     file_bytes = await file.read()
     await file.close()
 
+    if len(file_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File exceeds the 50 MB upload limit.",
+        )
+
     doc = KnowledgeDocument(
+        user_id=current_user.id,
         filename=file.filename or "document",
         source_email=source_email,
         notes=notes,
@@ -187,6 +202,7 @@ async def upload_document(
         file_bytes,
         file.filename or "document",
         suffix,
+        str(current_user.id),
     )
 
     return KnowledgeDocumentResponse.model_validate(doc)
@@ -201,13 +217,10 @@ def list_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> KnowledgeListResponse:
-    docs = (
-        db.execute(
-            select(KnowledgeDocument).order_by(KnowledgeDocument.upload_date.desc())
-        )
-        .scalars()
-        .all()
-    )
+    q = select(KnowledgeDocument).order_by(KnowledgeDocument.upload_date.desc())
+    if not current_user.is_admin:
+        q = q.where(KnowledgeDocument.user_id == current_user.id)
+    docs = db.execute(q).scalars().all()
     return KnowledgeListResponse(
         items=[KnowledgeDocumentResponse.model_validate(d) for d in docs],
         total=len(docs),
@@ -271,18 +284,19 @@ def delete_document(
 def save_email_to_knowledge(
     body: SaveFromEmailRequest,
     db: Session = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ) -> KnowledgeDocumentResponse:
     content = f"Subject: {body.subject}\nFrom: {body.sender or 'Unknown'}\n\n{body.snippet}"
     chunks = chunk_text(content)
     doc_id = uuid.uuid4()
     chroma_prefix = f"email_{doc_id}"
     chunk_ids = [f"{chroma_prefix}_{i}" for i in range(len(chunks))]
-    metadatas = [{"document_id": str(doc_id), "source": "email"}] * len(chunks)
+    metadatas = [{"document_id": str(doc_id), "source": "email", "user_id": str(current_user.id)}] * len(chunks)
     ChromaService().add_documents(texts=chunks, ids=chunk_ids, metadatas=metadatas)
 
     doc = KnowledgeDocument(
         id=doc_id,
+        user_id=current_user.id,
         filename=f"email_{doc_id}.txt",
         source_email=body.sender,
         notes=body.notes or body.subject,

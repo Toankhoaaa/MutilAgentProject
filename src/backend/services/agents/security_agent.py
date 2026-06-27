@@ -273,22 +273,6 @@ class EmailSecurityAgent:
             allow_delegation=False,
         )
 
-        self._task = Task(
-            description=_SECURITY_TASK_TEMPLATE,
-            expected_output=(
-                "A single JSON object with keys: is_safe (bool), risk_level (low|medium|high), "
-                "warnings (list of strings in Vietnamese). No markdown or extra text."
-            ),
-            agent=self._agent,
-            output_pydantic=SecurityAnalysisOutput,
-        )
-
-        self._crew = Crew(
-            agents=[self._agent],
-            tasks=[self._task],
-            process=Process.sequential,
-            verbose=False,
-        )
 
     async def analyze(
         self,
@@ -308,32 +292,57 @@ class EmailSecurityAgent:
             :class:`SecurityAnalysisOutput` with verdict, risk level, and warnings.
         """
         try:
-            return await asyncio.to_thread(
-                self._analyze_with_crew, email_subject, email_body, sender
-            )
+            return await self._analyze_with_crew(email_subject, email_body, sender)
         except (SecurityParseError, SecurityAgentError, LLMServiceError) as exc:
             logger.warning("CrewAI security analysis failed, using fallback: %s", exc)
+        try:
             return await self._analyze_with_gemini(email_subject, email_body, sender)
+        except Exception as exc:
+            logger.warning(
+                "Gemini security fallback also failed: %s — failing open with unverified status.", exc
+            )
+            return SecurityAnalysisOutput(
+                is_safe=True,
+                risk_level="low",
+                warnings=["Security analysis unavailable — manual review recommended."],
+            )
 
-    def _analyze_with_crew(
+    async def _analyze_with_crew(
         self,
         email_subject: str,
         email_body: str,
         sender: str | None,
     ) -> SecurityAnalysisOutput:
-        """Run the CrewAI workflow synchronously (called from asyncio.to_thread)."""
-        try:
-            result = self._crew.kickoff(
-                inputs={
-                    "few_shot": _FEW_SHOT_EXAMPLES,
-                    "email_subject": email_subject,
-                    "email_body": email_body,
-                    "sender": sender or "unknown",
-                }
+        """Create a fresh Crew per call; run via asyncio.to_thread to avoid executor conflicts."""
+        inputs = {
+            "few_shot": _FEW_SHOT_EXAMPLES,
+            "email_subject": email_subject,
+            "email_body": email_body,
+            "sender": sender or "unknown",
+        }
+
+        def _run() -> Any:
+            task = Task(
+                description=_SECURITY_TASK_TEMPLATE,
+                expected_output=(
+                    "A single JSON object with keys: is_safe (bool), risk_level (low|medium|high), "
+                    "warnings (list of strings in Vietnamese). No markdown or extra text."
+                ),
+                agent=self._agent,
+                output_pydantic=SecurityAnalysisOutput,
             )
+            crew = Crew(
+                agents=[self._agent],
+                tasks=[task],
+                process=Process.sequential,
+                verbose=False,
+            )
+            return crew.kickoff(inputs=inputs)
+
+        try:
+            result = await asyncio.to_thread(_run)
         except Exception as exc:
             raise SecurityAgentError(f"CrewAI kickoff failed: {exc}") from exc
-
         return self._parse_crew_result(result)
 
     async def _analyze_with_gemini(
@@ -354,7 +363,9 @@ class EmailSecurityAgent:
             schema=SecurityAnalysisOutput,
         )
         if not isinstance(result, SecurityAnalysisOutput):
-            return SecurityAnalysisOutput.model_validate(result.model_dump())
+            return SecurityAnalysisOutput.model_validate(
+                self._normalize(result.model_dump())
+            )
         return result
 
     def _parse_crew_result(self, result: Any) -> SecurityAnalysisOutput:
@@ -362,7 +373,10 @@ class EmailSecurityAgent:
         try:
             pydantic_output = getattr(result, "pydantic", None)
             if pydantic_output is not None:
-                return SecurityAnalysisOutput.model_validate(pydantic_output)
+                if isinstance(pydantic_output, SecurityAnalysisOutput):
+                    return pydantic_output
+                raw = pydantic_output.model_dump() if hasattr(pydantic_output, "model_dump") else dict(pydantic_output)
+                return SecurityAnalysisOutput.model_validate(self._normalize(raw))
 
             if isinstance(result, SecurityAnalysisOutput):
                 return result
@@ -371,18 +385,48 @@ class EmailSecurityAgent:
             if tasks_output:
                 last = tasks_output[-1]
                 if getattr(last, "pydantic", None) is not None:
-                    return SecurityAnalysisOutput.model_validate(last.pydantic)
+                    pyd = last.pydantic
+                    if isinstance(pyd, SecurityAnalysisOutput):
+                        return pyd
+                    raw = pyd.model_dump() if hasattr(pyd, "model_dump") else dict(pyd)
+                    return SecurityAnalysisOutput.model_validate(self._normalize(raw))
                 if getattr(last, "json_dict", None):
-                    return SecurityAnalysisOutput.model_validate(last.json_dict)
+                    return SecurityAnalysisOutput.model_validate(
+                        self._normalize(last.json_dict)
+                    )
 
             raw_output = getattr(result, "raw", None) or str(result)
             json_payload = self._extract_json_object(raw_output)
-            return SecurityAnalysisOutput.model_validate(json_payload)
+            return SecurityAnalysisOutput.model_validate(self._normalize(json_payload))
 
         except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise SecurityParseError(
                 f"Unable to parse CrewAI security output: {exc}"
             ) from exc
+
+    @staticmethod
+    def _normalize(data: dict[str, Any]) -> dict[str, Any]:
+        """Fill missing or invalid fields with safe defaults before Pydantic validation."""
+        result = dict(data)
+
+        is_safe = result.get("is_safe")
+        if not isinstance(is_safe, bool):
+            if isinstance(is_safe, str):
+                result["is_safe"] = is_safe.strip().lower() not in ("false", "0", "no")
+            else:
+                result["is_safe"] = True
+
+        level = result.get("risk_level")
+        result["risk_level"] = level.strip().lower() if isinstance(level, str) and level.strip().lower() in ("low", "medium", "high") else "low"
+
+        warnings = result.get("warnings")
+        if not isinstance(warnings, list):
+            result["warnings"] = [str(warnings)] if isinstance(warnings, str) and warnings.strip() else []
+
+        # Drop the "reasoning" field present in the prompt but not in the schema
+        result.pop("reasoning", None)
+
+        return result
 
     @staticmethod
     def _extract_json_object(raw_text: str) -> dict[str, Any]:

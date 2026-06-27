@@ -167,7 +167,7 @@ aiStopBtn.addEventListener('click', () => {
     chrome.storage.local.get(STORAGE_KEY, (result) => {
       const token = result[STORAGE_KEY] as string | undefined;
       if (token) {
-        fetch(`${API_BASE}/tasks/${taskId}/cancel`, {
+        fetch(`${API_BASE}/pipeline/${taskId}/cancel`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
         }).catch(() => {});

@@ -1,5 +1,6 @@
 import { useRouter } from "next/router";
 import Link from "next/link";
+import { Moon, Bell, LogOut } from "lucide-react";
 import type { UserProfile } from "@/lib/types";
 
 interface TopbarProps {
@@ -18,27 +19,6 @@ function getInitials(user: UserProfile): string {
   return user.email[0].toUpperCase();
 }
 
-const MoonIcon = () => (
-  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
-      d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-  </svg>
-);
-
-const BellIcon = () => (
-  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
-      d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-  </svg>
-);
-
-const LogoutIcon = () => (
-  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
-      d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-  </svg>
-);
-
 const channelTabs = [
   { label: "Dashboard", href: "/dashboard" },
   { label: "Emails", href: "/emails" },
@@ -49,7 +29,9 @@ export default function Topbar({ user }: TopbarProps) {
   const router = useRouter();
 
   const handleLogout = () => {
-    localStorage.removeItem("access_token");
+    if (user?.id) {
+      try { sessionStorage.removeItem(`inbox_${user.id}`); } catch {}
+    }
     window.location.href = "/api/v1/auth/logout";
   };
 
@@ -63,7 +45,7 @@ export default function Topbar({ user }: TopbarProps) {
       {/* Top row: page title + actions */}
       <div className="topbar-inner">
         <div className="flex items-center gap-2">
-          <h1 style={{ fontSize: "1rem", fontWeight: 700, color: "#1E293B", margin: 0 }}>
+          <h1 style={{ fontSize: "1rem", fontWeight: 600, color: "var(--color-ink)", margin: 0, letterSpacing: "-0.3px" }}>
             {channelTabs.find((t) => t.href === router.pathname)?.label ?? "Email Orchestrator"}
           </h1>
         </div>
@@ -71,10 +53,10 @@ export default function Topbar({ user }: TopbarProps) {
         <div className="flex items-center gap-2">
           {/* Icon buttons */}
           <button className="topbar-icon-btn" title="Toggle dark mode" aria-label="Toggle dark mode">
-            <MoonIcon />
+            <Moon size={15} strokeWidth={1.75} />
           </button>
           <button className="topbar-icon-btn" title="Notifications" aria-label="Notifications">
-            <BellIcon />
+            <Bell size={15} strokeWidth={1.75} />
           </button>
 
           {/* Separator */}
@@ -97,7 +79,7 @@ export default function Topbar({ user }: TopbarProps) {
 
           {/* Logout */}
           <button onClick={handleLogout} className="btn-logout">
-            <LogoutIcon />
+            <LogOut size={15} strokeWidth={1.75} />
             <span className="hidden sm:inline">Logout</span>
           </button>
         </div>

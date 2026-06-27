@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.api.dependencies import get_db, require_admin
@@ -150,10 +150,13 @@ def list_users(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: str | None = Query(None, description="Filter by email or display name."),
+    include_deleted: bool = Query(False, description="Include soft-deleted (inactive) users."),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> UserListResponse:
     q = select(User)
+    if not include_deleted:
+        q = q.where(User.is_active.is_(True))
     if search:
         pattern = f"%{search}%"
         q = q.where(or_(User.email.ilike(pattern), User.display_name.ilike(pattern)))
@@ -208,6 +211,14 @@ def update_user(
     db: Session = Depends(get_db),
 ) -> UserAdminResponse:
     user = _get_user_or_404(user_id, db)
+    if payload.is_admin is False and user.is_admin:
+        remaining = db.scalar(
+            select(func.count()).select_from(User).where(
+                and_(User.is_admin.is_(True), User.is_active.is_(True))
+            )
+        ) or 0
+        if remaining <= 1:
+            raise HTTPException(status_code=400, detail="Cannot remove the last administrator.")
     for field, value in payload.model_dump(exclude_none=True).items():
         setattr(user, field, value)
     user.updated_at = datetime.now(timezone.utc)
@@ -223,17 +234,21 @@ def update_user(
 )
 def delete_user(
     user_id: uuid.UUID,
-    hard: bool = Query(False, description="Permanently remove the record. Default: soft-delete (suspend)."),
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> None:
     user = _get_user_or_404(user_id, db)
-    if hard:
-        db.delete(user)
-    else:
-        user.is_active = False
-        user.status = "SUSPENDED"
-        user.updated_at = datetime.now(timezone.utc)
+    if user.is_admin:
+        remaining = db.scalar(
+            select(func.count()).select_from(User).where(
+                and_(User.is_admin.is_(True), User.is_active.is_(True))
+            )
+        ) or 0
+        if remaining <= 1:
+            raise HTTPException(status_code=400, detail="Cannot remove the last administrator.")
+    user.is_active = False
+    user.status = "SUSPENDED"
+    user.updated_at = datetime.now(timezone.utc)
     db.commit()
 
 

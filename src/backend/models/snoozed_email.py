@@ -15,6 +15,8 @@ class SnoozedEmail(Base):
     __table_args__ = (Index("idx_snoozed_emails_snooze_until", "snooze_until"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # nullable for rows created before this column was added
+    user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     gmail_message_id: Mapped[str] = mapped_column(String(255), nullable=False)
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject: Mapped[str | None] = mapped_column(String(500), nullable=True)

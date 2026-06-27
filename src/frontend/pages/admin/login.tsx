@@ -1,4 +1,5 @@
 import Head from "next/head";
+import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/router";
 import api from "@/lib/axios";
@@ -20,8 +21,7 @@ export default function AdminLoginPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await api.post<{ access_token: string }>("/auth/admin/login", form);
-      localStorage.setItem("access_token", res.data.access_token);
+      await api.post("/auth/admin/login", form);
       router.replace("/admin");
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail;
@@ -115,9 +115,9 @@ export default function AdminLoginPage() {
             </form>
 
             <p className="mt-6 text-center text-sm text-slate-500">
-              <a href="/login" className="text-indigo-600 hover:underline">
+              <Link href="/login" className="text-indigo-600 hover:underline">
                 Back to User Login
-              </a>
+              </Link>
             </p>
           </div>
         </div>

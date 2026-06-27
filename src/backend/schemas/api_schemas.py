@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from enum import Enum
 from typing import Generic, Literal, TypeVar
 from uuid import UUID
 
@@ -111,6 +112,13 @@ class GmailEmailItem(BaseModel):
     sender: str | None = None
     date: str | None = None
     snippet: str | None = None
+
+
+class GmailListResponse(BaseModel):
+    """Paginated Gmail inbox response."""
+
+    emails: list[GmailEmailItem]
+    next_page_token: str | None = None
 
 
 class ProcessedEmailDetail(BaseModel):
@@ -268,6 +276,7 @@ class UserSignatureUpdateSchema(BaseModel):
 class AnalyzeEmailRequest(BaseModel):
     """Request payload for the stateless email analysis endpoint."""
 
+    gmail_message_id: str | None = Field(default=None, max_length=255)
     subject: str = Field(..., min_length=1, max_length=500)
     body: str = Field(..., min_length=1)
     sender: str | None = Field(default=None, max_length=255)
@@ -400,6 +409,7 @@ class EmailActionResponse(BaseModel):
 class ProcessEmailRequest(BaseModel):
     """Raw email text submitted for stateless classification and draft generation."""
 
+    gmail_message_id: str | None = Field(default=None, max_length=255, description="Gmail message ID for cache lookup.")
     text: str = Field(..., min_length=1, description="Email body text.")
     subject: str = Field(default="", description="Email subject line.")
     sender: str = Field(default="", description="Sender email address.")
@@ -407,6 +417,10 @@ class ProcessEmailRequest(BaseModel):
     tone: str = Field(
         default="Professional",
         description="Writing tone for the AI reply: Formal, Polite, Professional, Friendly, or Casual.",
+    )
+    generate_draft: bool = Field(
+        default=False,
+        description="When True, bypass classification cache and always run the Response Agent.",
     )
 
     @field_validator("tone")
@@ -432,7 +446,7 @@ class ProcessEmailResult(BaseModel):
 
 
 class QuickClassifyItem(BaseModel):
-    """A single thread to classify in a lightweight batch request."""
+    """A single message to classify in a lightweight batch request."""
 
     thread_id: str
     subject: str
@@ -441,9 +455,176 @@ class QuickClassifyItem(BaseModel):
 
 
 class QuickClassifyResult(BaseModel):
-    """Lightweight classification result for a single thread (no draft, no DB write)."""
+    """Lightweight classification result for a single message."""
 
     thread_id: str
     category: str
     priority_score: int
     confidence: float
+
+
+# ---------------------------------------------------------------------------
+# Task management schemas
+# ---------------------------------------------------------------------------
+
+
+class TaskStatus(str, Enum):
+    suggested = "suggested"
+    todo = "todo"
+    in_progress = "in_progress"
+    done = "done"
+    dismissed = "dismissed"
+
+
+class TaskSource(str, Enum):
+    manual = "manual"
+    ai_email = "ai_email"
+    delegation = "delegation"
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+    priority: int = Field(default=3, ge=1, le=5)
+    deadline: date | None = None
+    remind_at: datetime | None = None
+
+
+class TaskUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    priority: int | None = Field(default=None, ge=1, le=5)
+    deadline: date | None = None
+    status: TaskStatus | None = None
+    remind_at: datetime | None = None
+
+
+class TaskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    title: str
+    description: str | None = None
+    status: str
+    priority: int
+    deadline: date | None = None
+    remind_at: datetime | None = None
+    source: str
+    source_email_id: str | None = None
+    source_thread_id: str | None = None
+    department: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# Department management schemas
+# ---------------------------------------------------------------------------
+
+
+class DepartmentCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: str = Field(..., min_length=1, max_length=255)
+    keywords: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        if "@" not in v:
+            raise ValueError("Invalid email address.")
+        return v.strip().lower()
+
+
+class DepartmentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: str | None = Field(default=None, min_length=1, max_length=255)
+    keywords: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str | None) -> str | None:
+        if v is not None and "@" not in v:
+            raise ValueError("Invalid email address.")
+        return v.strip().lower() if v else v
+
+
+class DepartmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    name: str
+    email: str
+    keywords: str | None = None
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Delegation schemas
+# ---------------------------------------------------------------------------
+
+
+class DelegationItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    delegation_id: UUID
+    department_name: str | None = None
+    department_id: UUID | None = None
+    recipient_email: str | None = None
+    work_items: list[str] = Field(default_factory=list)
+    draft_subject: str | None = None
+    draft_body: str | None = None
+    gmail_draft_id: str | None = None
+    cc_emails: str | None = None
+    bcc_emails: str | None = None
+    confidence: float | None = None
+    reason: str | None = None
+    status: str
+    sent_at: datetime | None = None
+    already_sent_warning: bool = False
+
+
+class DelegationResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    source_email_id: str
+    source_thread_id: str | None = None
+    original_subject: str | None = None
+    status: str
+    created_at: datetime
+    items: list[DelegationItemResponse] = Field(default_factory=list)
+
+
+class DelegateEmailResponse(BaseModel):
+    is_delegation: bool
+    message: str | None = None
+    delegation: DelegationResponse | None = None
+
+
+class DelegationItemUpdate(BaseModel):
+    recipient_email: str | None = None
+    draft_subject: str | None = None
+    draft_body: str | None = None
+    cc_emails: str | None = None
+    bcc_emails: str | None = None
+    department_id: UUID | None = None
+
+
+# ---------------------------------------------------------------------------
+# Delegation settings schemas
+# ---------------------------------------------------------------------------
+
+
+class DelegationSettingsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    company_header: str | None = None
+    signature: str | None = None
+
+
+class DelegationSettingsUpdate(BaseModel):
+    company_header: str | None = None
+    signature: str | None = None

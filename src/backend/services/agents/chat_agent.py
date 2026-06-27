@@ -175,6 +175,7 @@ class ChatbotAgent:
         rag_agent: RagAgent | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """
         Args:
@@ -195,6 +196,7 @@ class ChatbotAgent:
 
         self._gmail = gmail_service
         self._rag = rag_agent or RagAgent()
+        self._user_id = user_id
         self._model = normalize_gemini_model(model or settings.GEMINI_MODEL)
         self._client = genai.Client(api_key=resolved_key)
         self._history: list[types.Content] = []
@@ -446,7 +448,7 @@ class ChatbotAgent:
                 return await asyncio.to_thread(scrape_url, args["url"])
 
             if name == "find_user_cv":
-                return await asyncio.to_thread(self._rag.find_user_cv)
+                return await asyncio.to_thread(self._rag.find_user_cv, self._user_id)
 
             if name == "search_emails":
                 emails: list[dict[str, Any]] = await self._gmail.search_emails(

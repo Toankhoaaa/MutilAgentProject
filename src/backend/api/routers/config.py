@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.api.dependencies import get_db
+from backend.api.dependencies import get_db, require_admin
 from backend.models.configuration import Configuration
+from backend.models.user import User
 from backend.schemas.api_schemas import (
     AgentToneUpdateSchema,
     ConfigurationResponse,
@@ -63,7 +64,10 @@ def _upsert_configuration(
     summary="List configurations",
     description="Returns all rows from the ``configurations`` table.",
 )
-def list_configurations(db: Session = Depends(get_db)) -> list[ConfigurationResponse]:
+def list_configurations(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+) -> list[ConfigurationResponse]:
     """Fetch the full system configuration catalog."""
     rows = db.scalars(select(Configuration).order_by(Configuration.key)).all()
     return [ConfigurationResponse.model_validate(row) for row in rows]
@@ -81,6 +85,7 @@ def list_configurations(db: Session = Depends(get_db)) -> list[ConfigurationResp
 def update_configuration(
     payload: ConfigurationUpdateSchema,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
 ) -> ConfigurationResponse:
     """
     Update ``value`` for the given configuration ``key``.
@@ -118,6 +123,7 @@ def update_configuration(
 def update_agent_tone(
     payload: AgentToneUpdateSchema,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
 ) -> ConfigurationResponse:
     """Persist the preferred writing tone for the Response Agent."""
     row = _upsert_configuration(
@@ -139,6 +145,7 @@ def update_agent_tone(
 def update_user_signature(
     payload: UserSignatureUpdateSchema,
     db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
 ) -> ConfigurationResponse:
     """Persist the email signature block for draft personalization."""
     row = _upsert_configuration(
