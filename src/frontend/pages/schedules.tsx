@@ -5,16 +5,28 @@ import useSWR from "swr";
 import Layout from "@/components/Layout";
 import EventList from "@/components/Schedule/EventList";
 import EventDetailViewer from "@/components/Schedule/EventDetailViewer";
+import EventFormModal, { localInputToIso, type EventFormValues } from "@/components/Schedule/EventFormModal";
 import api from "@/lib/axios";
 import type { ScheduleEvent, UserProfile } from "@/lib/types";
 
 const fetcher = (url: string) => api.get(url).then((r) => r.data);
+
+function parseAttendees(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((a) => a.trim())
+    .filter(Boolean);
+}
 
 export default function SchedulesPage() {
   const router = useRouter();
   const [selected, setSelected] = useState<ScheduleEvent | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [formMode, setFormMode] = useState<"create" | "edit" | null>(null);
+  const [formSaving, setFormSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const { data: user, error: authError } = useSWR<UserProfile>("/auth/me", fetcher, {
@@ -34,6 +46,20 @@ export default function SchedulesPage() {
     setTimeout(() => setToast(null), 5000);
   }, []);
 
+  const upsertLocal = useCallback(
+    (updated: ScheduleEvent) => {
+      setSelected(updated);
+      mutate((prev) => {
+        const exists = prev?.some((e) => e.id === updated.id);
+        if (exists) {
+          return prev?.map((e) => (e.id === updated.id ? updated : e));
+        }
+        return [updated, ...(prev ?? [])];
+      }, false);
+    },
+    [mutate],
+  );
+
   if (authError) return null;
 
   const handleConfirm = async () => {
@@ -48,8 +74,8 @@ export default function SchedulesPage() {
         meet_link: data.meet_link ?? null,
         is_synced: true,
       };
-      setSelected(updated);
-      mutate((prev) => prev?.map((e) => (e.id === selected.id ? updated : e)), false);
+      upsertLocal(updated);
+      showToast("Lịch hẹn đã được xác nhận.", "success");
     } catch {
       showToast("Không thể xác nhận lịch hẹn. Vui lòng thử lại.", "error");
     } finally {
@@ -69,8 +95,7 @@ export default function SchedulesPage() {
         meet_link: null,
         is_synced: false,
       };
-      setSelected(updated);
-      mutate((prev) => prev?.map((e) => (e.id === selected.id ? updated : e)), false);
+      upsertLocal(updated);
       showToast("Lịch hẹn đã được huỷ.", "success");
     } catch {
       showToast("Không thể huỷ lịch hẹn. Vui lòng thử lại.", "error");
@@ -79,15 +104,76 @@ export default function SchedulesPage() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!selected) return;
+    if (!window.confirm(`Xóa lịch hẹn "${selected.title}"?`)) return;
+    setDeleting(true);
+    const idToRemove = selected.id;
+    try {
+      await api.delete(`/emails/scheduled-events/${idToRemove}`);
+      setSelected(null);
+      mutate((prev) => prev?.filter((e) => e.id !== idToRemove), false);
+      showToast("Lịch hẹn đã được xóa.", "success");
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 404) {
+        // Event no longer exists in DB — remove from local list
+        setSelected(null);
+        mutate((prev) => prev?.filter((e) => e.id !== idToRemove), false);
+        showToast("Lịch hẹn đã được xóa.", "success");
+      } else {
+        showToast("Không thể xóa lịch hẹn. Vui lòng thử lại.", "error");
+      }
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const handleResolve = async (newTime: string) => {
     if (!selected) return;
     try {
-      await api.post(`/schedules/${selected.id}/resolve`, { newTime });
-      const updated: ScheduleEvent = { ...selected, startTime: newTime, status: "PENDING" };
-      setSelected(updated);
-      mutate((prev) => prev?.map((e) => (e.id === selected.id ? updated : e)), false);
+      const { data } = await api.post<ScheduleEvent>(
+        `/emails/scheduled-events/${selected.id}/resolve`,
+        { newTime },
+      );
+      upsertLocal(data);
+      showToast("Đã chọn khung giờ mới.", "success");
     } catch {
-      // status remains unchanged; user can retry
+      showToast("Không thể cập nhật khung giờ. Vui lòng thử lại.", "error");
+    }
+  };
+
+  const handleFormSubmit = async (values: EventFormValues) => {
+    setFormSaving(true);
+    setFormError(null);
+    const payload = {
+      title: values.title,
+      start_time: localInputToIso(values.startTime),
+      end_time: localInputToIso(values.endTime),
+      attendees: parseAttendees(values.attendees),
+    };
+
+    try {
+      if (formMode === "create") {
+        const { data } = await api.post<ScheduleEvent>("/emails/scheduled-events", payload);
+        upsertLocal(data);
+        setSelected(data);
+        showToast("Lịch hẹn mới đã được tạo.", "success");
+      } else if (formMode === "edit" && selected) {
+        const { data } = await api.put<ScheduleEvent>(`/emails/scheduled-events/${selected.id}`, {
+          title: payload.title,
+          start_time: payload.start_time,
+          end_time: payload.end_time,
+          attendees: payload.attendees,
+        });
+        upsertLocal(data);
+        showToast("Lịch hẹn đã được cập nhật.", "success");
+      }
+      setFormMode(null);
+    } catch {
+      setFormError("Không thể lưu lịch hẹn. Kiểm tra lại thông tin và thử lại.");
+    } finally {
+      setFormSaving(false);
     }
   };
 
@@ -114,11 +200,26 @@ export default function SchedulesPage() {
           </div>
         )}
 
-        <div className="mb-6">
-          <h1 className="text-xl font-bold text-slate-900 tracking-tight">Quản lý lịch hẹn</h1>
-          <p className="text-sm text-slate-500 mt-0.5">
-            Xem và xác nhận các lịch hẹn được trích xuất từ email.
-          </p>
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-slate-900 tracking-tight">Quản lý lịch hẹn</h1>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Xem, tạo, chỉnh sửa và xác nhận các lịch hẹn được trích xuất từ email.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setFormError(null);
+              setFormMode("create");
+            }}
+            className="btn-primary self-start sm:self-auto"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Tạo lịch hẹn
+          </button>
         </div>
 
         {isLoading && (
@@ -158,17 +259,33 @@ export default function SchedulesPage() {
                   onConfirm={handleConfirm}
                   onResolve={handleResolve}
                   onCancel={handleCancel}
+                  onEdit={() => {
+                    setFormError(null);
+                    setFormMode("edit");
+                  }}
+                  onDelete={handleDelete}
                   confirming={confirming}
                   cancelling={cancelling}
+                  deleting={deleting}
                 />
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center py-20 text-slate-400 text-sm">
-                <p>Chọn một lịch hẹn để xem chi tiết.</p>
+                <p>Chọn một lịch hẹn để xem chi tiết hoặc bấm &ldquo;Tạo lịch hẹn&rdquo;.</p>
               </div>
             )}
           </div>
         )}
+
+        <EventFormModal
+          mode={formMode === "edit" ? "edit" : "create"}
+          event={formMode === "edit" ? selected : null}
+          open={formMode !== null}
+          saving={formSaving}
+          error={formError}
+          onClose={() => setFormMode(null)}
+          onSubmit={handleFormSubmit}
+        />
       </Layout>
     </>
   );

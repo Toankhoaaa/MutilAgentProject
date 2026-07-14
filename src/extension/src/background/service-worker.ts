@@ -25,7 +25,13 @@ interface KeepaliveMessage {
   token?: string;
 }
 
-type IncomingMessage = AnalyzeEmailMessage | SaveAttachmentMessage | KeepaliveMessage;
+interface CheckAnalysisCacheMessage {
+  type: 'CHECK_ANALYSIS_CACHE';
+  gmail_message_id: string;
+  token: string;
+}
+
+type IncomingMessage = AnalyzeEmailMessage | SaveAttachmentMessage | KeepaliveMessage | CheckAnalysisCacheMessage;
 
 // ── WebSocket persistent connection ──────────────────────────────────────────
 
@@ -85,6 +91,30 @@ chrome.runtime.onMessage.addListener(
     if (message.type === 'KEEPALIVE') {
       connectWS(message.token);
       sendResponse({ ok: true });
+      return true;
+    }
+
+    if (message.type === 'CHECK_ANALYSIS_CACHE') {
+      const { gmail_message_id, token } = message;
+      // DB-only lookup — never triggers Gemini/LLM calls. Reuses the same
+      // batch endpoint the web inbox uses to skip re-running the pipeline.
+      fetch(`${API_BASE}/emails/fetch-cached-analyses`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify([gmail_message_id]),
+      })
+        .then((res) => {
+          if (!res.ok) {
+            return res.text().then((text) => {
+              sendResponse({ ok: false, error: `HTTP ${res.status}: ${text}` });
+            });
+          }
+          return res.json().then((data) => sendResponse({ ok: true, data }));
+        })
+        .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
       return true;
     }
 

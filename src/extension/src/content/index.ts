@@ -543,6 +543,10 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
   // Track open thread views by thread ID so the compose handler can read them
   const threadViews = new Map<string, InboxSDK.ThreadView>();
 
+  // Guards the cached-security-banner check below so it fires once per
+  // message ID per session, not on every re-render of the same thread.
+  const securityCacheChecked = new Set<string>();
+
   // ── Knowledge Base: floating save modal ─────────────────────────────────────
   const kbModal = document.createElement('div');
   kbModal.style.cssText = [
@@ -750,6 +754,10 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     const id = await threadView.getThreadIDAsync();
     threadViews.set(id, threadView);
     threadView.on('destroy', () => threadViews.delete(id));
+
+    // Display-only: show a previously-cached security verdict immediately on
+    // open. Never triggers a new analysis — only reads email_analysis_cache.
+    checkAndShowCachedSecurity(threadView);
   });
 
   sdk.Lists.registerThreadRowViewHandler((row) => {
@@ -913,6 +921,42 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
     noticeBar.el.querySelector('button')?.addEventListener('click', () => noticeBar.destroy());
   }
 
+  // Display-only check: looks up an existing cached analysis for the thread's
+  // latest message and renders the warning banner if it's risky. Never calls
+  // the analysis agents — a cache miss means "not yet analyzed" and shows nothing.
+  function checkAndShowCachedSecurity(threadView: InboxSDK.ThreadView): void {
+    void (async () => {
+      const messages = threadView.getMessageViews();
+      const latestMessage = messages[messages.length - 1];
+      if (!latestMessage) return;
+
+      const gmailMsgId = (latestMessage as { getMessageIDAsync?: () => Promise<string> }).getMessageIDAsync
+        ? await (latestMessage as { getMessageIDAsync: () => Promise<string> }).getMessageIDAsync()
+        : null;
+      if (!gmailMsgId || securityCacheChecked.has(gmailMsgId)) return;
+      securityCacheChecked.add(gmailMsgId);
+
+      const stored = await chrome.storage.local.get('ai_reply_token');
+      const token = stored['ai_reply_token'] as string | undefined;
+      if (!token) return;
+
+      const response = await new Promise<{ ok: boolean; data?: Record<string, AnalyzeResponse>; error?: string }>(
+        (resolve) => chrome.runtime.sendMessage(
+          { type: 'CHECK_ANALYSIS_CACHE', gmail_message_id: gmailMsgId, token },
+          resolve,
+        ),
+      );
+      if (!response.ok || !response.data) return;
+
+      const cached = response.data[gmailMsgId];
+      if (!cached) return; // never analyzed — show nothing automatically
+
+      if (cached.risk_level === 'medium' || cached.risk_level === 'high') {
+        injectSecurityBanner(threadView, cached.risk_level, cached.warnings);
+      }
+    })();
+  }
+
   function renderResult(data: AnalyzeResponse, threadView: InboxSDK.ThreadView): void {
     const summaryHtml = data.summary
       .map((b) => `<li style="margin-bottom:4px">${escapeHtml(b)}</li>`)
@@ -960,7 +1004,7 @@ InboxSDK.load(2, APP_ID).then((sdk) => {
   }
 
   sdk.Toolbars.registerThreadButton({
-    title: 'AI Analysis',
+    title: 'Phân tích đầy đủ',
     iconUrl: AI_ANALYSIS_ICON,
     positions: ['THREAD'],
     onClick(event) {

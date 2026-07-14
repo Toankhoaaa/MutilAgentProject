@@ -305,6 +305,8 @@ class AnalyzeEmailResponse(BaseModel):
     is_safe: bool = True
     risk_level: Literal["low", "medium", "high"] = "low"
     warnings: list[str] = []
+    category: str | None = None
+    confidence: float | None = None
 
 
 class ScheduleEventResponse(BaseModel):
@@ -321,6 +323,33 @@ class ScheduleEventResponse(BaseModel):
     html_link: str | None = None
     meet_link: str | None = None
     is_synced: bool = False
+
+
+class CreateScheduleEventRequest(BaseModel):
+    """Manual creation of a calendar event from the scheduling UI."""
+
+    title: str = Field(..., min_length=1, max_length=500)
+    start_time: datetime
+    end_time: datetime
+    attendees: list[str] = Field(default_factory=list)
+
+
+class UpdateScheduleEventRequest(BaseModel):
+    """Partial update of a pending or conflict scheduling row."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    attendees: list[str] | None = None
+
+
+class ResolveScheduleConflictRequest(BaseModel):
+    """Pick an alternative slot to resolve a scheduling conflict."""
+
+    new_time: datetime = Field(..., alias="newTime")
+    new_end_time: datetime | None = Field(default=None, alias="newEndTime")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AuthLoginResponse(BaseModel):

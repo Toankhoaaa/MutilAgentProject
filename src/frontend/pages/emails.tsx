@@ -17,7 +17,11 @@ import type {
   GmailListResponse,
   InboxEmailState,
   AnalyzeEmailResponse,
+  AnalysisStatus,
 } from "@/lib/types";
+
+// Tune this down to 3 if Gemini is still unstable during demo rehearsal.
+const MAX_PIPELINE_PER_LOAD = 5;
 
 type InboxCacheEntry = Omit<InboxEmailState, "analysis" | "isAnalyzing">;
 
@@ -25,7 +29,12 @@ function _inboxKey(userId: string) { return `inbox_${userId}`; }
 
 function saveInboxSession(emails: InboxEmailState[], userId: string) {
   try {
-    const entries: InboxCacheEntry[] = emails.map(({ analysis: _a, isAnalyzing: _i, ...rest }) => rest);
+    // Normalize in-flight emails: if isAnalyzing was true when navigating away,
+    // save as 'pending' so they're re-processed on next inbox load.
+    const entries: InboxCacheEntry[] = emails.map(({ analysis: _a, isAnalyzing, ...rest }) => ({
+      ...rest,
+      analysisStatus: isAnalyzing ? 'pending' : rest.analysisStatus,
+    }));
     sessionStorage.setItem(_inboxKey(userId), JSON.stringify(entries));
   } catch {}
 }
@@ -63,6 +72,9 @@ export default function EmailsPage() {
 
   // Analysis cache — survives re-opens without re-fetching
   const analysisCacheRef = useRef<Map<string, AnalyzeEmailResponse>>(new Map());
+
+  // Draft cache — prevents re-generating a draft when re-opening the same urgent/need_reply email
+  const draftCacheRef = useRef<Map<string, { subject: string; body: string }>>(new Map());
   const sessionHydratedRef = useRef(false);
 
   // Inbox state
@@ -119,7 +131,7 @@ export default function EmailsPage() {
 
   const isAdmin = user?.is_admin === true;
 
-  const INBOX_FILTER = new Set(["important", "need_reply"]);
+  const INBOX_FILTER = new Set(["important", "need_reply", "urgent", "spam"]);
   const displayedEmails = inboxEmails
     ? inboxEmails.filter((e) => e.category === null || INBOX_FILTER.has(e.category.toLowerCase()))
     : null;
@@ -128,9 +140,105 @@ export default function EmailsPage() {
     ...e,
     analysis: analysisCacheRef.current.get(e.gmail_message_id) ?? null,
     isAnalyzing: false,
+    analysisStatus: 'idle',
     category: null,
     priority_score: null,
   });
+
+  // Run the full /analyze pipeline for a batch of newly-loaded inbox items.
+  // Cache is checked first (one fast DB call); only uncached emails hit Gemini,
+  // sequentially (one at a time) and capped at MAX_PIPELINE_PER_LOAD per load.
+  const runPipelineBatch = async (items: InboxEmailState[]) => {
+    if (items.length === 0) return;
+
+    const gmailMsgIds = items.map((e) => e.gmail_message_id);
+
+    // 1. Batch cache check — one fast DB query, no Gemini calls.
+    let cachedMap: Record<string, AnalyzeEmailResponse> = {};
+    try {
+      const cacheRes = await api.post<Record<string, AnalyzeEmailResponse>>(
+        "/emails/fetch-cached-analyses",
+        gmailMsgIds,
+      );
+      cachedMap = cacheRes.data;
+    } catch {
+      // Cache check failed — treat all as uncached, pipeline continues.
+    }
+
+    // 2. Apply cached results to state immediately (instant render).
+    const cachedIds = new Set(Object.keys(cachedMap));
+    if (cachedIds.size > 0) {
+      setInboxEmails((prev) =>
+        prev
+          ? prev.map((e) => {
+              const cached = cachedMap[e.gmail_message_id];
+              return cached ? { ...e, analysis: cached, analysisStatus: 'idle' as const, category: cached.category ?? e.category } : e;
+            })
+          : null,
+      );
+    }
+
+    // 3. Identify uncached emails from this batch.
+    const uncached = items.filter((e) => !cachedIds.has(e.gmail_message_id));
+    const toProcess = uncached.slice(0, MAX_PIPELINE_PER_LOAD);
+    const overflow = uncached.slice(MAX_PIPELINE_PER_LOAD);
+
+    // 4. Mark overflow (beyond cap) as pending — shown as "Chưa phân tích".
+    if (overflow.length > 0) {
+      const overflowIds = new Set(overflow.map((e) => e.gmail_message_id));
+      setInboxEmails((prev) =>
+        prev
+          ? prev.map((e) =>
+              overflowIds.has(e.gmail_message_id)
+                ? { ...e, analysisStatus: 'pending' as const }
+                : e,
+            )
+          : null,
+      );
+    }
+
+    // 5. Process up to MAX_PIPELINE_PER_LOAD uncached emails sequentially.
+    //    await each before starting the next — prevents Gemini rate-limit storms.
+    for (const email of toProcess) {
+      // Mark this email as in-flight.
+      setInboxEmails((prev) =>
+        prev
+          ? prev.map((e) =>
+              e.gmail_message_id === email.gmail_message_id ? { ...e, isAnalyzing: true } : e,
+            )
+          : null,
+      );
+
+      try {
+        const resp = await api.post<AnalyzeEmailResponse>("/emails/analyze", {
+          subject: email.subject ?? "",
+          body: email.snippet || "(no preview)",
+          sender: email.sender ?? "",
+          gmail_message_id: email.gmail_message_id,
+        });
+        setInboxEmails((prev) =>
+          prev
+            ? prev.map((e) =>
+                e.gmail_message_id === email.gmail_message_id
+                  ? { ...e, analysis: resp.data, isAnalyzing: false, analysisStatus: 'idle' as const, category: resp.data.category ?? e.category }
+                  : e,
+              )
+            : null,
+        );
+      } catch {
+        // One failure must not abort the whole batch — mark error, continue.
+        setInboxEmails((prev) =>
+          prev
+            ? prev.map((e) =>
+                e.gmail_message_id === email.gmail_message_id
+                  ? { ...e, isAnalyzing: false, analysisStatus: 'error' as const }
+                  : e,
+              )
+            : null,
+        );
+      }
+    }
+  };
 
   const buildInboxQuery = (hs: boolean, sp: boolean) =>
     ["in:inbox", !sp && "-category:promotions", hs && "-category:social"]
@@ -149,37 +257,9 @@ export default function EmailsPage() {
       setNextPageToken(res.data.next_page_token);
       setInboxEmails(items);
 
-      // Background classify-quick — inbox stays functional if this fails
-      const classifyPayload = items
-        .filter((e) => e.thread_id)
-        .map((e) => ({
-          thread_id: e.thread_id!,
-          subject: e.subject ?? "",
-          snippet: e.snippet ?? "",
-          sender: e.sender,
-        }));
-
-      if (classifyPayload.length > 0) {
-        api
-          .post<Array<{ thread_id: string; category: string; priority_score: number; confidence: number }>>(
-            "/emails/classify-quick",
-            classifyPayload,
-          )
-          .then((r) => {
-            const resultMap = new Map(r.data.map((x) => [x.thread_id, x]));
-            setInboxEmails((prev) =>
-              prev
-                ? prev.map((email) => {
-                    const hit = email.thread_id ? resultMap.get(email.thread_id) : undefined;
-                    return hit
-                      ? { ...email, category: hit.category, priority_score: hit.priority_score }
-                      : email;
-                  })
-                : null,
-            );
-          })
-          .catch(() => {});
-      }
+      // Full pipeline: cache-check first, then sequential /analyze for uncached emails
+      // (up to MAX_PIPELINE_PER_LOAD). Replaces the old parallel classify-quick.
+      void runPipelineBatch(items);
     } catch {
       setInboxError("Không thể tải inbox. Kiểm tra kết nối Gmail.");
     } finally {
@@ -214,28 +294,8 @@ export default function EmailsPage() {
         return [...prev, ...newItems.filter((e) => !existingIds.has(e.gmail_message_id))];
       });
 
-      const classifyPayload = newItems
-        .filter((e) => e.thread_id)
-        .map((e) => ({ thread_id: e.thread_id!, subject: e.subject ?? "", snippet: e.snippet ?? "", sender: e.sender }));
-      if (classifyPayload.length > 0) {
-        api
-          .post<Array<{ thread_id: string; category: string; priority_score: number; confidence: number }>>(
-            "/emails/classify-quick",
-            classifyPayload,
-          )
-          .then((r) => {
-            const resultMap = new Map(r.data.map((x) => [x.thread_id, x]));
-            setInboxEmails((prev) =>
-              prev
-                ? prev.map((email) => {
-                    const hit = email.thread_id ? resultMap.get(email.thread_id) : undefined;
-                    return hit ? { ...email, category: hit.category, priority_score: hit.priority_score } : email;
-                  })
-                : null,
-            );
-          })
-          .catch(() => {});
-      }
+      // Full pipeline for the new page: same cap + cache logic as initial load.
+      void runPipelineBatch(newItems);
     } catch {
       setInboxError("Không thể tải thêm email. Thử lại sau.");
     } finally {
@@ -292,6 +352,10 @@ export default function EmailsPage() {
     return res.data;
   };
 
+  const handleDraftGenerated = (id: string, draft: { subject: string; body: string }) => {
+    draftCacheRef.current.set(id, draft);
+  };
+
   const handleCleanupSpam = async () => {
     setCleanupLoading(true);
     setCleanupResult(null);
@@ -320,7 +384,7 @@ export default function EmailsPage() {
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="text-sm font-semibold text-ink">Inbox</h2>
-                <p className="text-xs text-mute mt-0.5">Xem email từ Gmail — không lưu vào database</p>
+                <p className="text-xs text-mute mt-0.5">Xem email từ Gmail</p>
               </div>
               <button
                 onClick={handleLoadInbox}
@@ -421,6 +485,31 @@ export default function EmailsPage() {
                         )}
                         {email.priority_score != null && (
                           <span className="text-xs text-mute font-mono">P{email.priority_score}</span>
+                        )}
+                        {email.isAnalyzing && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm text-xs bg-canvas-soft-2 text-mute border border-hairline">
+                            <span className="w-2 h-2 rounded-full border border-body border-t-transparent animate-spin shrink-0" />
+                            Đang phân tích
+                          </span>
+                        )}
+                        {!email.isAnalyzing && email.analysisStatus === 'error' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm text-xs bg-error-soft text-error border border-error-soft">
+                            Lỗi, thử lại
+                          </span>
+                        )}
+                        {!email.isAnalyzing && email.analysisStatus === 'pending' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded-sm text-xs bg-canvas-soft-2 text-mute border border-hairline">
+                            Chưa phân tích
+                          </span>
+                        )}
+                        {!email.isAnalyzing && email.analysis && email.analysis.risk_level !== 'low' && (
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded-sm text-xs ${
+                            email.analysis.risk_level === 'high'
+                              ? 'bg-error-soft text-error border border-error-soft'
+                              : 'bg-warning-soft text-warning border border-warning-soft'
+                          }`}>
+                            {email.analysis.risk_level === 'high' ? '⚠ Nguy hiểm' : '⚠ Cảnh báo'}
+                          </span>
                         )}
                       </div>
                     </div>
@@ -534,6 +623,7 @@ export default function EmailsPage() {
                           snippet: email.summary,
                           analysis: null,
                           isAnalyzing: false,
+                          analysisStatus: 'idle' as const,
                           category: email.category,
                           priority_score: email.priority_score,
                         })
@@ -616,6 +706,8 @@ export default function EmailsPage() {
           analysisCacheRef.current.set(id, result);
         }}
         onGenerateDraft={handleGenerateDraft}
+        onDraftGenerated={handleDraftGenerated}
+        draftCache={draftCacheRef.current}
         isAdmin={isAdmin}
       />
     </>

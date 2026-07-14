@@ -26,6 +26,8 @@ def build_crew_llm(temperature: float = 0.2) -> BaseLLM:
         model=settings.GEMINI_MODEL,
         google_api_key=settings.GEMINI_API_KEY,
         temperature=temperature,
+        request_timeout=30,  # hard 30s per HTTP call — prevents TCP-level stalls
+        max_retries=0,       # disable LangChain's own retry; our loop controls backoff
     )
 
     crew_llm = create_llm(langchain_llm)

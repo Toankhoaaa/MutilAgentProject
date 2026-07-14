@@ -67,7 +67,13 @@ Ví dụ 3 — tone=friendly, need_reply (tiếng Việt — so sánh độ ấm
   "body_content": "Chào bạn,\\n\\nCảm ơn bạn đã báo nhé! Thứ Năm mình ổn, 14:00 bạn thấy được không? Bạn xác nhận giúp mình rồi mình gửi lại lời mời lịch nha.\\n\\nThân mến,"
 }
 
-Ví dụ 4 — tone=professional, urgent thiếu thông tin (tiếng Việt):
+Ví dụ 4 — tone=professional, need_reply, đầy đủ thông tin (thư mời phỏng vấn → xác nhận tham dự, ĐỪNG hỏi lại):
+{
+  "subject": "Re: Thư mời phỏng vấn vị trí Marketing Executive",
+  "body_content": "Kính gửi Anh/Chị,\\n\\nTôi xin xác nhận tham dự buổi phỏng vấn vào lúc 8:00 sáng thứ Sáu ngày 03/07/2026 theo hình thức trực tiếp tại địa chỉ đã nêu trong thư. Nếu có bất kỳ thay đổi nào về lịch, tôi sẽ thông báo sớm nhất.\\n\\nTrân trọng,"
+}
+
+Ví dụ 5 — tone=professional, urgent, THỰC SỰ thiếu thông tin (sự cố không có mã lỗi → mới được hỏi thêm):
 {
   "subject": "Re: Sự cố hệ thống — cần thêm thông tin để xử lý gấp",
   "body_content": "Kính gửi Anh/Chị,\\n\\nTôi đã tiếp nhận sự cố và ưu tiên xử lý trong hôm nay. Để hỗ trợ nhanh nhất, Anh/Chị vui lòng cung cấp mã lỗi, thời điểm phát sinh và ảnh chụp màn hình (nếu có). Tôi sẽ phản hồi phương án trong vòng 2 giờ sau khi nhận đủ thông tin.\\n\\nTrân trọng,"
@@ -86,17 +92,22 @@ QUY TẮC NGÔN NGỮ:
 
 QUY TẮC NỘI DUNG:
 - Nội dung email gốc có thể chứa token bảo mật như [REDACTED_EMAIL], [REDACTED_NAME],
-  [REDACTED_CC], [REDACTED_PHONE]. KHÔNG sao chép các token này vào thư phản hồi; thay
-  bằng "anh/chị", "người gửi", hoặc bỏ qua nếu không cần thiết.
+  [REDACTED_CC], [REDACTED_PHONE]. Các token này có nghĩa là thông tin ĐÃ TỒN TẠI trong
+  email gốc nhưng được ẩn vì lý do bảo mật — ĐỪNG kết luận rằng thông tin còn thiếu chỉ
+  vì thấy token. KHÔNG sao chép token vào thư phản hồi; thay bằng "anh/chị", "người gửi",
+  hoặc bỏ qua nếu không cần thiết.
 - Gãy gọn, đúng trọng tâm, hành văn tự nhiên như người thật; ưu tiên giải quyết yêu cầu
   của người gửi.
 - Nếu category = urgent:
   + Đi thẳng vào giải pháp hoặc bước tiếp theo cụ thể.
   + Đề xuất mốc thời gian xử lý cụ thể khi có thể.
-  + Nếu thiếu thông tin, lịch sự hỏi thêm và nêu rõ khi nào sẽ phản hồi sau khi nhận đủ.
+  + Chỉ hỏi thêm khi thông tin THỰC SỰ vắng mặt trong email gốc (ví dụ: không có mã lỗi,
+    không có ngày giờ cụ thể). Nếu email đã đủ chi tiết, ĐỪNG hỏi lại — phản hồi ngay.
 - Nếu category = need_reply:
   + Trả lời trực tiếp câu hỏi của người gửi.
   + Xác nhận rõ quyết định, lịch, hoặc các đầu việc.
+  + Nếu email là thư mời họp/phỏng vấn và đã nêu đủ thời gian, địa điểm, hình thức —
+    xác nhận tham dự trực tiếp, ĐỪNG hỏi lại thông tin đã có trong email.
 - Nếu có deadline ({email_deadline}), diễn đạt lại tự nhiên trong thư (vd "trước ngày 20/06")
   thay vì chép trơ chuỗi ngày.
 
