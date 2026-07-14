@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.core import task_manager
@@ -32,6 +33,7 @@ from backend.services.agents.security_agent import EmailSecurityAgent
 from backend.services.calendar_service import CalendarAPIError, GoogleCalendarService
 from backend.services.gmail_service import GmailService
 from backend.services.rule_engine import RuleEngine
+from backend.services.scheduling_service import upsert_scheduling_from_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +311,7 @@ class EmailOrchestrator:
                                 confidence=_cached_cls.confidence or 0.0,
                             )
                             _from_cache = True
-                            logger.debug("classify cache hit (batch): gmail_message_id=%s", gmail_message_id)
+                            logger.info("classify cache hit (batch): gmail_message_id=%s — skipping LLM call", gmail_message_id)
                         else:
                             classification_output, classify_ms = await self._classify_email(raw_email)
                             llm_calls_count += 1
@@ -342,17 +344,32 @@ class EmailOrchestrator:
                     scheduling_result = await self._handle_scheduling(raw_email, user_id, security_blocked=security_blocked)
                     if scheduling_result:
                         result_status = scheduling_result["status"]
-                        if result_status == "scheduled":
-                            summary["scheduled_events"].append(
-                                {"gmail_message_id": gmail_message_id, **scheduling_result["payload"]}
+                        payload_data = scheduling_result.get("payload")
+                        if payload_data and result_status in ("scheduled", "conflict"):
+                            start_dt = datetime.fromisoformat(payload_data["start_time"])
+                            end_dt = datetime.fromisoformat(payload_data["end_time"])
+                            row = upsert_scheduling_from_extraction(
+                                self._db,
+                                user_id,
+                                gmail_message_id=gmail_message_id or None,
+                                event_title=payload_data.get("summary"),
+                                start_datetime=start_dt,
+                                end_datetime=end_dt,
+                                attendees=payload_data.get("attendees") or [],
+                                suggested_reply=payload_data.get("description"),
+                                status="CONFLICT" if result_status == "conflict" else "PENDING",
                             )
-                        elif result_status == "conflict":
-                            summary["scheduling_conflicts"].append(
-                                {
-                                    "gmail_message_id": gmail_message_id,
-                                    "alternatives": scheduling_result.get("alternatives", []),
-                                }
-                            )
+                            self._db.flush()
+                            entry = {
+                                "gmail_message_id": gmail_message_id,
+                                "scheduling_id": str(row.id),
+                                **payload_data,
+                            }
+                            if result_status == "conflict":
+                                entry["alternatives"] = scheduling_result.get("alternatives", [])
+                                summary["scheduling_conflicts"].append(entry)
+                            else:
+                                summary["scheduled_events"].append(entry)
                         self._db.commit()
 
                     if classification_output.category == EmailCategory.URGENT:
@@ -793,7 +810,13 @@ class EmailOrchestrator:
             logger.warning("Alternative slot suggestion failed for %s: %s", gmail_message_id, exc)
             alternatives = []
 
-        return {"status": "conflict", "alternatives": alternatives}
+        return {"status": "conflict", "alternatives": alternatives, "payload": {
+            "summary": sched_output.event_summary or subject,
+            "start_time": action.start_time.isoformat(),
+            "end_time": action.end_time.isoformat(),
+            "attendees": action.attendees,
+            "description": sched_output.suggested_reply,
+        }}
 
     def _resolve_user_id(self) -> uuid.UUID:
         """Return the configured or first active user id."""
@@ -958,15 +981,23 @@ class EmailOrchestrator:
             existing.summary = result.summary
             existing.confidence = result.confidence
         else:
-            self._db.add(Classification(
-                user_id=self._user_id,
-                gmail_message_id=gmail_message_id,
-                thread_id=thread_id,
-                category=result.category.value,
-                priority_score=result.priority_score,
-                summary=result.summary,
-                confidence=result.confidence,
-            ))
+            try:
+                with self._db.begin_nested():
+                    self._db.add(Classification(
+                        user_id=self._user_id,
+                        gmail_message_id=gmail_message_id,
+                        thread_id=thread_id,
+                        category=result.category.value,
+                        priority_score=result.priority_score,
+                        summary=result.summary,
+                        confidence=result.confidence,
+                    ))
+            except IntegrityError:
+                # Concurrent poll already inserted this row; the existing row is fine.
+                logger.debug(
+                    "_upsert_classification: concurrent insert for %s — keeping existing row.",
+                    gmail_message_id,
+                )
 
     async def _suggest_tasks_for_email(
         self,

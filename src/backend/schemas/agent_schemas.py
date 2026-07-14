@@ -59,11 +59,11 @@ class EmailClassificationOutput(BaseModel):
     @field_validator("summary")
     @classmethod
     def validate_summary_length(cls, value: str) -> str:
-        """Ensure the summary stays within two sentences."""
+        """Truncate to two sentences when the model returns more."""
         cleaned = " ".join(value.split())
-        sentences = [part for part in re.split(r"[.!?]+", cleaned) if part.strip()]
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned.strip())
         if len(sentences) > 2:
-            raise ValueError("Summary must not exceed two sentences.")
+            return " ".join(sentences[:2])
         return cleaned
 
 

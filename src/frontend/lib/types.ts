@@ -137,11 +137,17 @@ export interface AnalyzeEmailResponse {
   is_safe: boolean;
   risk_level: "low" | "medium" | "high";
   warnings: string[];
+  category: string | null;
+  confidence: number | null;
 }
+
+export type AnalysisStatus = 'idle' | 'pending' | 'error';
 
 export interface InboxEmailState extends GmailEmailItem {
   analysis: AnalyzeEmailResponse | null;
   isAnalyzing: boolean;
+  /** Pipeline status for the full /analyze flow; 'idle' = analyzed or never started */
+  analysisStatus: AnalysisStatus;
   category: string | null;
   priority_score: number | null;
 }

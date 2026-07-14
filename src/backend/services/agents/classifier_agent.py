@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -70,14 +71,14 @@ Expected JSON:
   "confidence": 0.93
 }
 
-Example 5 — Quan trọng nhưng không khẩn:
-Subject: "Tài liệu kế hoạch Q2 cần xem xét"
-Body: "Bạn xem giúp bản kế hoạch Q2 đính kèm khi rảnh trong tuần nhé. Chưa cần xử lý ngay."
+Example 5 — Quan trọng (thông báo để ĐỌC, KHÔNG cần phản hồi):
+Subject: "Tài liệu kế hoạch Q2 đã được phê duyệt"
+Body: "FYI: Bản kế hoạch Q2 đã được phê duyệt và đính kèm tại đây. Anh chị xem để nắm thông tin, không cần phản hồi lại."
 Expected JSON:
 {
   "category": "important",
   "priority_score": 4,
-  "summary": "Tài liệu kế hoạch Q2 đính kèm cần xem xét trong tuần, chưa cần xử lý ngay.",
+  "summary": "Kế hoạch Q2 đã được phê duyệt, đính kèm để đọc tham khảo, không cần phản hồi.",
   "deadline": null,
   "confidence": 0.88
 }
@@ -105,6 +106,54 @@ Expected JSON:
   "deadline": "2026-06-20",
   "confidence": 0.92
 }
+
+Example 8 — Khẩn cấp ẨN (không có từ "khẩn/gấp"; deadline hôm nay + hậu quả mất hợp đồng). current_date=2026-06-20:
+Subject: "Hợp đồng với Công ty ABC — hết hạn lúc 17h hôm nay"
+Body: "Nhắc bạn rằng hợp đồng dịch vụ với Công ty ABC sẽ hết hạn lúc 17h chiều nay. Phía đối tác đã thông báo nếu không nhận được chữ ký gia hạn trước giờ đó, họ sẽ chuyển sang nhà cung cấp khác. Link ký gia hạn đính kèm bên dưới."
+Expected JSON:
+{
+  "category": "urgent",
+  "priority_score": 5,
+  "summary": "Hợp đồng Công ty ABC hết hạn lúc 17h hôm nay, đối tác sẽ chuyển nhà cung cấp nếu không ký gia hạn kịp.",
+  "deadline": "2026-06-20",
+  "confidence": 0.93
+}
+
+Example 9 — Urgent IMPLICIT (English; no "urgent" keyword; same-day action + financial consequence). current_date=2026-06-20:
+Subject: "ALERT: Checkout service down — 500+ orders blocked"
+Body: "Our payment gateway has been returning errors since 09:15. More than 500 customers cannot complete their purchases. The on-call engineer needs your approval to roll back the deployment today. Each hour of downtime costs an estimated $8,000 in lost revenue."
+Expected JSON:
+{
+  "category": "urgent",
+  "priority_score": 5,
+  "summary": "Payment gateway down since 09:15, 500+ orders blocked, approval needed today to authorize a rollback.",
+  "deadline": "2026-06-20",
+  "confidence": 0.94
+}
+
+Example 10 — CẶP TƯƠNG PHẢN A — important (thông báo chính sách, chỉ cần ĐỌC, KHÔNG hỏi phản hồi):
+Subject: "Thông báo: Chính sách nghỉ phép mới áp dụng từ 01/07"
+Body: "Kính gửi toàn thể nhân viên. Ban lãnh đạo thông báo chính sách nghỉ phép mới có hiệu lực từ 01/07/2026. Tài liệu chi tiết đính kèm để các bạn nắm bắt. Không cần phản hồi email này."
+Expected JSON:
+{
+  "category": "important",
+  "priority_score": 4,
+  "summary": "Thông báo chính sách nghỉ phép mới áp dụng từ 01/07, đính kèm tài liệu để đọc tham khảo.",
+  "deadline": null,
+  "confidence": 0.91
+}
+
+Example 11 — CẶP TƯƠNG PHẢN A — need_reply (cùng chủ đề chính sách nhưng CÓ CÂU HỎI nhắm vào người nhận). current_date=2026-06-20:
+Subject: "Chính sách mới — anh có ý kiến gì không?"
+Body: "Anh ơi, ban HR gửi bản nháp chính sách nghỉ phép mới. Anh có thể xem và phản hồi ý kiến trước ngày 26/6 không? Nếu không có ý kiến thì HR sẽ coi như đồng thuận."
+Expected JSON:
+{
+  "category": "need_reply",
+  "priority_score": 3,
+  "summary": "HR hỏi ý kiến về bản nháp chính sách nghỉ phép mới, cần phản hồi trước ngày 26/6.",
+  "deadline": "2026-06-26",
+  "confidence": 0.89
+}
 """.strip()
 
 
@@ -120,11 +169,22 @@ Hôm nay là: {current_date}. Dùng giá trị này để quy đổi "hôm nay",
 thành ngày ISO thật. Nếu email không nhắc mốc thời gian nào, deadline = null.
 
 ĐỊNH NGHĨA CATEGORY (chọn DUY NHẤT một):
-- urgent      — đòi hành động trong ngày / sự cố khẩn / nợ-hạn cùng ngày / họp khẩn
-- need_reply  — có câu hỏi trực tiếp hoặc yêu cầu xác nhận, cần người nhận trả lời
-- important   — việc quan trọng nhưng KHÔNG gấp, không cần phản hồi ngay
+- urgent      — đòi hành động ngay trong ngày / sự cố nghiêm trọng / nợ-hạn cùng ngày / họp khẩn.
+                Dấu hiệu: DEADLINE cụ thể hôm nay (hoặc vài giờ nữa) KÈM HẬU QUẢ rõ ràng
+                (mất hợp đồng, dịch vụ bị ngưng, thiệt hại tài chính, hệ thống sập, khách hàng bị ảnh hưởng...).
+                QUAN TRỌNG: từ "khẩn/urgent" KHÔNG cần phải xuất hiện — email không có từ đó
+                vẫn là urgent nếu có deadline hôm nay + hậu quả cụ thể.
+- need_reply  — email ĐÒI HỎI người nhận PHẢI PHẢN HỒI: có câu hỏi trực tiếp nhắm vào người nhận,
+                yêu cầu xác nhận, đề nghị quyết định, hoặc hành động cụ thể cần câu trả lời.
+- important   — thông báo/cập nhật quan trọng chỉ cần ĐỌC & NẮM THÔNG TIN; KHÔNG có câu hỏi
+                nhắm vào người nhận, KHÔNG cần phản hồi (thông báo chính sách, cập nhật dự án,
+                FYI, lịch họp đã được đặt mà không hỏi xác nhận).
 - newsletter  — bản tin, digest, thông báo định kỳ, có nút hủy đăng ký
 - spam        — quảng cáo không mời, lừa đảo, tiếp thị rác
+
+KIỂM TRA need_reply vs important — hỏi trước khi chọn:
+"Email này có câu hỏi hoặc yêu cầu cụ thể NHẮM VÀO TÔI, cần TÔI phản hồi không?"
+→ CÓ → need_reply | KHÔNG (chỉ cần đọc, theo dõi, không cần trả lời) → important
 
 QUY TẮC KHI CHỒNG NHÃN (áp theo thứ tự ưu tiên, dừng ở mục khớp đầu tiên):
 1. Nếu vừa khẩn vừa cần trả lời  → urgent
@@ -150,6 +210,9 @@ Subject: {subject}
 Body:
 {body}
 """.strip()
+
+_TRANSIENT_SIGNALS = ("503", "unavailable", "resourceexhausted")
+
 
 class ClassifierAgentError(Exception):
     """Base exception for classifier agent failures."""
@@ -271,10 +334,31 @@ class EmailClassifierAgent:
             )
             return crew.kickoff(inputs=inputs)
 
-        try:
-            result = await asyncio.to_thread(_run)
-        except Exception as exc:
-            raise ClassifierAgentError(f"CrewAI kickoff failed: {exc}") from exc
+        for _attempt in range(4):  # up to 3 retries (attempts 0–3)
+            try:
+                result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=35.0)
+                break
+            except asyncio.TimeoutError as exc:
+                if _attempt < 3:
+                    _delay = 2.0 * (2 ** _attempt) + random.uniform(0, 0.5)
+                    logger.warning(
+                        "Gemini crew kickoff timed out (attempt %d/3), retrying in %.1fs",
+                        _attempt + 1, _delay,
+                    )
+                    await asyncio.sleep(_delay)
+                else:
+                    raise ClassifierAgentError("CrewAI kickoff timed out after 3 retries") from exc
+            except Exception as exc:
+                err_lower = str(exc).lower()
+                if any(tok in err_lower for tok in _TRANSIENT_SIGNALS) and _attempt < 3:
+                    _delay = 2.0 * (2 ** _attempt) + random.uniform(0, 0.5)
+                    logger.warning(
+                        "Gemini transient error (attempt %d/3), retrying in %.1fs: %s",
+                        _attempt + 1, _delay, exc,
+                    )
+                    await asyncio.sleep(_delay)
+                else:
+                    raise ClassifierAgentError(f"CrewAI kickoff failed: {exc}") from exc
         return self._parse_crew_result(result)
 
     async def _classify_with_gemini(

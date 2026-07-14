@@ -200,11 +200,16 @@ class GeminiService:
         config = types.GenerateContentConfig(temperature=temperature)
 
         try:
-            response = await self._client.aio.models.generate_content(
-                model=self._model,
-                contents=prompt,
-                config=config,
+            response = await asyncio.wait_for(
+                self._client.aio.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=config,
+                ),
+                timeout=30.0,
             )
+        except asyncio.TimeoutError as exc:
+            raise LLMNetworkError("Gemini call timed out after 30s") from exc
         except genai_errors.APIError as exc:
             if self._is_rate_limit_error(exc):
                 raise LLMRateLimitError(str(exc)) from exc
@@ -228,11 +233,16 @@ class GeminiService:
         )
 
         try:
-            response = await self._client.aio.models.generate_content(
-                model=self._model,
-                contents=prompt,
-                config=config,
+            response = await asyncio.wait_for(
+                self._client.aio.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=config,
+                ),
+                timeout=30.0,
             )
+        except asyncio.TimeoutError as exc:
+            raise LLMNetworkError("Gemini call timed out after 30s") from exc
         except genai_errors.APIError as exc:
             if self._is_rate_limit_error(exc):
                 raise LLMRateLimitError(str(exc)) from exc

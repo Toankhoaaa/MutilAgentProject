@@ -1,5 +1,5 @@
 import axios from "axios";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import { X, ChevronDown, Reply, Zap, Users, RotateCcw, Database, Check, ShieldAlert, AlertTriangle } from "lucide-react";
 import api from "@/lib/axios";
@@ -94,13 +94,15 @@ interface Props {
   onClose: () => void;
   onAnalysisComplete?: (id: string, result: AnalyzeEmailResponse) => void;
   onGenerateDraft?: (email: InboxEmailState, tone: string) => Promise<ProcessEmailResult>;
+  onDraftGenerated?: (id: string, draft: { subject: string; body: string }) => void;
+  draftCache?: Map<string, { subject: string; body: string }>;
   isAdmin?: boolean;
 }
 
 type ItemEdit = { recipientEmail: string; draftSubject: string; draftBody: string; ccEmails: string; bccEmails: string; assignedDeptId: string | null };
 type ItemStatus = { sending: boolean; dismissing: boolean; error: string | null };
 
-export default function EmailDetailSheet({ email, onClose, onAnalysisComplete, onGenerateDraft, isAdmin = false }: Props) {
+export default function EmailDetailSheet({ email, onClose, onAnalysisComplete, onGenerateDraft, onDraftGenerated, draftCache, isAdmin = false }: Props) {
   const { data: departments = [] } = useSWR<Department[]>("/departments", deptFetcher);
 
   const [analysis, setAnalysis] = useState<AnalyzeEmailResponse | null>(null);
@@ -120,6 +122,8 @@ export default function EmailDetailSheet({ email, onClose, onAnalysisComplete, o
   const [draftBody, setDraftBody] = useState("");
   const [draftPushed, setDraftPushed] = useState(false);
   const [pushingDraft, setPushingDraft] = useState(false);
+  // Guards auto-draft so it fires at most once per email open, even if deps re-evaluate.
+  const autoTriggered = useRef(false);
 
   // Delegation state
   const [delegating, setDelegating] = useState(false);
@@ -135,11 +139,16 @@ export default function EmailDetailSheet({ email, onClose, onAnalysisComplete, o
     setDraftSubject("");
     setDraftBody("");
     setDraftPushed(false);
+    autoTriggered.current = true; // prevent auto-trigger from re-firing after this
     try {
       const result = await onGenerateDraft(email, selectedTone);
       if (result.draft_content) {
         setDraftSubject(result.draft_subject ?? "");
         setDraftBody(result.draft_content);
+        onDraftGenerated?.(email.gmail_message_id, {
+          subject: result.draft_subject ?? "",
+          body: result.draft_content,
+        });
       } else {
         setDraftError("Email này không cần phản hồi hoặc chưa được phân loại là cần trả lời.");
       }
@@ -405,6 +414,66 @@ export default function EmailDetailSheet({ email, onClose, onAnalysisComplete, o
 
     return () => controller.abort();
   }, [email?.gmail_message_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset per-email auto-draft guard whenever the selected email changes.
+  // Defined BEFORE the auto-trigger effect so React runs it first on same-dep change.
+  useEffect(() => {
+    autoTriggered.current = false;
+  }, [email?.gmail_message_id]);
+
+  // Auto-generate draft when an urgent/need_reply email is opened.
+  // Fires at most once per email open (guarded by autoTriggered ref).
+  // Checks draft cache first — no LLM call on re-open.
+  useEffect(() => {
+    if (autoTriggered.current) return;
+    if (!email || !onGenerateDraft) return;
+
+    const highRisk = analysis?.is_safe === false || analysis?.risk_level === "high";
+    if (highRisk) return;
+
+    const category = (analysis?.category ?? email.category ?? "").toLowerCase();
+    if (category !== "urgent" && category !== "need_reply") return;
+
+    // Not ready yet — wait for analysis to finish so we know isHighRisk accurately.
+    if (isAnalyzing) return;
+
+    // Already have a draft in local state (e.g. user clicked the button manually).
+    if (draftBody) return;
+
+    autoTriggered.current = true;
+
+    // Cache hit — restore without a new LLM call.
+    if (draftCache) {
+      const cached = draftCache.get(email.gmail_message_id);
+      if (cached) {
+        setDraftSubject(cached.subject);
+        setDraftBody(cached.body);
+        return;
+      }
+    }
+
+    // Cache miss — generate via /emails/classify.
+    setIsGeneratingDraft(true);
+    setDraftError(null);
+    onGenerateDraft(email, "Professional")
+      .then((result) => {
+        if (result.draft_content) {
+          setDraftSubject(result.draft_subject ?? "");
+          setDraftBody(result.draft_content);
+          onDraftGenerated?.(email.gmail_message_id, {
+            subject: result.draft_subject ?? "",
+            body: result.draft_content,
+          });
+        }
+      })
+      .catch(() => {
+        // Silent — user can still click Generate Draft manually.
+        autoTriggered.current = false;
+      })
+      .finally(() => {
+        setIsGeneratingDraft(false);
+      });
+  }, [email?.gmail_message_id, analysis?.category, email?.category, isAnalyzing, draftBody, analysis?.is_safe, analysis?.risk_level]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!email) return null;
 

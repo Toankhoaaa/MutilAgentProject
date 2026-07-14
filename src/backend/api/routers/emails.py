@@ -29,6 +29,7 @@ from backend.api.dependencies import (
     increment_request_count,
 )
 from backend.models.classification import Classification
+from backend.models.draft_cache import DraftCache
 from backend.models.email_analysis_cache import EmailAnalysisCache
 from backend.services.calendar_service import CalendarServiceError, GoogleCalendarService
 from backend.core import task_manager
@@ -40,6 +41,7 @@ from backend.schemas.agent_schemas import EmailCategory, EmailClassificationOutp
 from backend.schemas.api_schemas import (
     AnalyzeEmailRequest,
     AnalyzeEmailResponse,
+    CreateScheduleEventRequest,
     EventDetailsResponse,
     GmailEmailItem,
     GmailListResponse,
@@ -48,7 +50,9 @@ from backend.schemas.api_schemas import (
     ProcessEmailsResponse,
     QuickClassifyItem,
     QuickClassifyResult,
+    ResolveScheduleConflictRequest,
     ScheduleEventResponse,
+    UpdateScheduleEventRequest,
 )
 from backend.services.agents import (
     EmailAnalysisAgent,
@@ -60,12 +64,97 @@ from backend.services.agents import (
 from backend.services.agents.privacy_agent import PrivacyAgent
 from backend.services.gmail_service import GmailAPIError, GmailAuthenticationError, GmailService
 from backend.services.orchestrator import EmailOrchestrator
+from backend.services.scheduling_service import (
+    get_user_scheduling,
+    row_to_response,
+    upsert_scheduling_from_extraction,
+)
 
 _privacy = PrivacyAgent()
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/emails", tags=["Emails"])
+
+
+def _upsert_classification_cache(
+    db: Session,
+    *,
+    user_id: uuid.UUID,
+    gmail_message_id: str,
+    category: str,
+    priority_score: int,
+    summary: str,
+    confidence: float,
+    thread_id: str | None = None,
+) -> None:
+    """Insert or update a classification cache row; tolerate concurrent inserts."""
+    existing = db.scalar(
+        select(Classification).where(
+            Classification.gmail_message_id == gmail_message_id,
+            Classification.user_id == user_id,
+        )
+    )
+    if existing:
+        existing.category = category
+        existing.priority_score = priority_score
+        existing.summary = summary
+        existing.confidence = confidence
+        if thread_id is not None:
+            existing.thread_id = thread_id
+        return
+
+    try:
+        with db.begin_nested():
+            db.add(Classification(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                thread_id=thread_id,
+                category=category,
+                priority_score=priority_score,
+                summary=summary,
+                confidence=confidence,
+            ))
+    except IntegrityError:
+        logger.debug(
+            "classification cache race on insert gmail_message_id=%s — keeping existing row",
+            gmail_message_id,
+        )
+
+
+def _upsert_draft_cache(
+    db: Session,
+    *,
+    user_id: uuid.UUID,
+    gmail_message_id: str,
+    draft_subject: str,
+    draft_content: str,
+) -> None:
+    """Insert or update a draft cache row; tolerate concurrent inserts."""
+    existing = db.scalar(
+        select(DraftCache).where(
+            DraftCache.gmail_message_id == gmail_message_id,
+            DraftCache.user_id == user_id,
+        )
+    )
+    if existing:
+        existing.draft_subject = draft_subject
+        existing.draft_content = draft_content
+        return
+
+    try:
+        with db.begin_nested():
+            db.add(DraftCache(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                draft_subject=draft_subject,
+                draft_content=draft_content,
+            ))
+    except IntegrityError:
+        logger.debug(
+            "draft cache race on insert gmail_message_id=%s — keeping existing row",
+            gmail_message_id,
+        )
 
 
 class ProcessTriggerRequest(BaseModel):
@@ -173,18 +262,19 @@ async def classify_email(
     payload: ProcessEmailRequest,
     current_user: User = Depends(check_quota),
     db: Session = Depends(get_db),
+    gmail_service: GmailService = Depends(get_gmail_service),
     classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
     response_agent: EmailResponseAgent = Depends(get_response_agent),
 ) -> ProcessEmailResult:
     """Classify raw email text and optionally draft a reply; email content is not persisted."""
-    if payload.gmail_message_id and not payload.generate_draft:
+    if payload.gmail_message_id:
         cached = db.scalar(
             select(Classification).where(
                 Classification.gmail_message_id == payload.gmail_message_id,
                 Classification.user_id == current_user.id,
             )
         )
-        if cached:
+        if cached and not payload.generate_draft:
             logger.info("classify cache hit (single): gmail_message_id=%s", payload.gmail_message_id)
             return ProcessEmailResult(
                 category=cached.category or "unknown",
@@ -193,12 +283,40 @@ async def classify_email(
                 confidence=cached.confidence or 0.0,
             )
 
+        if cached and payload.generate_draft:
+            cached_draft = db.scalar(
+                select(DraftCache).where(
+                    DraftCache.gmail_message_id == payload.gmail_message_id,
+                    DraftCache.user_id == current_user.id,
+                )
+            )
+            if cached_draft:
+                logger.info("draft cache hit, skipping generation: gmail_message_id=%s", payload.gmail_message_id)
+                return ProcessEmailResult(
+                    category=cached.category or "unknown",
+                    priority_score=cached.priority_score or 0,
+                    summary=cached.summary or "",
+                    confidence=cached.confidence or 0.0,
+                    draft_content=cached_draft.draft_content,
+                    draft_subject=cached_draft.draft_subject,
+                )
+
+    email_body = payload.text
+    if payload.generate_draft and payload.gmail_message_id:
+        try:
+            fetched = await gmail_service.get_email_content(payload.gmail_message_id)
+            if fetched and not fetched.startswith("Error:"):
+                email_body = fetched
+                logger.info("classify: fetched full body for draft (msg=%s, len=%d)", payload.gmail_message_id, len(fetched))
+        except Exception:
+            logger.warning("classify: could not fetch full body for %s, falling back to snippet", payload.gmail_message_id)
+
     task_id = payload.task_id or str(uuid.uuid4())
     task_manager.register_task(task_id, str(current_user.id))
     try:
         raw_email = {
             "subject": payload.subject,
-            "body": payload.text,
+            "body": email_body,
             "sender": payload.sender,
         }
         orchestrator = EmailOrchestrator(
@@ -213,27 +331,31 @@ async def classify_email(
         increment_request_count(current_user, db)
 
         if payload.gmail_message_id:
-            existing = db.scalar(
-                select(Classification).where(
-                    Classification.gmail_message_id == payload.gmail_message_id,
-                    Classification.user_id == current_user.id,
-                )
+            _upsert_classification_cache(
+                db,
+                user_id=current_user.id,
+                gmail_message_id=payload.gmail_message_id,
+                category=result["category"],
+                priority_score=result["priority_score"],
+                summary=result["summary"],
+                confidence=result["confidence"],
             )
-            if existing:
-                existing.category = result["category"]
-                existing.priority_score = result["priority_score"]
-                existing.summary = result["summary"]
-                existing.confidence = result["confidence"]
-            else:
-                db.add(Classification(
+            if result["draft_content"]:
+                _upsert_draft_cache(
+                    db,
                     user_id=current_user.id,
                     gmail_message_id=payload.gmail_message_id,
-                    category=result["category"],
-                    priority_score=result["priority_score"],
-                    summary=result["summary"],
-                    confidence=result["confidence"],
-                ))
-            db.commit()
+                    draft_subject=result["draft_subject"] or "",
+                    draft_content=result["draft_content"],
+                )
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                logger.warning(
+                    "classify: classification cache commit race gmail_message_id=%s",
+                    payload.gmail_message_id,
+                )
 
         return ProcessEmailResult.model_validate(result)
     except asyncio.CancelledError:
@@ -416,6 +538,7 @@ async def analyze_email(
     analysis_agent: EmailAnalysisAgent = Depends(get_analysis_agent),
     scheduling_agent: EmailSchedulingAgent = Depends(get_scheduling_agent),
     security_agent: EmailSecurityAgent = Depends(get_security_agent),
+    classifier_agent: EmailClassifierAgent = Depends(get_classifier_agent),
 ) -> AnalyzeEmailResponse:
     """Deep-analyze an email and optionally persist a detected calendar event."""
     if payload.gmail_message_id:
@@ -436,7 +559,20 @@ async def analyze_email(
     # comparing the From header domain against the email body links requires the raw value.
     masked_sender = _privacy.mask(payload.sender or "")
 
-    _gather_results = await asyncio.gather(
+    # Check classifications table before calling Classifier LLM (same cache-check-first pattern).
+    cached_cls: Classification | None = None
+    if payload.gmail_message_id:
+        cached_cls = db.scalar(
+            select(Classification).where(
+                Classification.gmail_message_id == payload.gmail_message_id,
+                Classification.user_id == current_user.id,
+            )
+        )
+        if cached_cls:
+            logger.info("classify cache hit in analyze: gmail_message_id=%s", payload.gmail_message_id)
+
+    run_classifier = cached_cls is None
+    coroutines: list = [
         analysis_agent.analyze(
             email_subject=masked_subject,
             email_body=masked_body,
@@ -452,15 +588,48 @@ async def analyze_email(
             email_body=masked_body,
             sender=payload.sender or "",  # real sender — needed for spoofing domain check
         ),
-        return_exceptions=True,
-    )
-    analysis_result, scheduling_result, security_result = _gather_results
+    ]
+    if run_classifier:
+        coroutines.append(
+            classifier_agent.classify(masked_subject, masked_body, masked_sender or None)
+        )
+
+    _gather_results = await asyncio.gather(*coroutines, return_exceptions=True)
+
+    if run_classifier:
+        analysis_result, scheduling_result, security_result, classifier_output = _gather_results
+    else:
+        analysis_result, scheduling_result, security_result = _gather_results
+        classifier_output = None
+
     if isinstance(scheduling_result, BaseException):
         scheduling_result = SchedulingOutput(is_meeting_request=False, suggested_reply="")
     if isinstance(analysis_result, BaseException):
         raise analysis_result
     if isinstance(security_result, BaseException):
         raise security_result
+
+    # Resolve category from cache hit or fresh classifier output.
+    category: str | None = None
+    confidence: float | None = None
+    if cached_cls:
+        category = cached_cls.category
+        confidence = cached_cls.confidence
+    elif isinstance(classifier_output, EmailClassificationOutput):
+        category = classifier_output.category.value
+        confidence = classifier_output.confidence
+        if payload.gmail_message_id:
+            _upsert_classification_cache(
+                db,
+                user_id=current_user.id,
+                gmail_message_id=payload.gmail_message_id,
+                category=category,
+                priority_score=classifier_output.priority_score,
+                summary=classifier_output.summary,
+                confidence=confidence or 0.0,
+            )
+    elif isinstance(classifier_output, BaseException):
+        logger.warning("Classifier failed in analyze_email, category omitted: %s", classifier_output)
 
     has_event = scheduling_result.is_meeting_request and scheduling_result.action is not None
     event_details: EventDetailsResponse | None = None
@@ -480,32 +649,17 @@ async def analyze_email(
             attendees=action.attendees,
         )
 
-        row: EmailScheduling | None = None
-        if payload.gmail_message_id:
-            row = db.scalar(
-                select(EmailScheduling).where(
-                    EmailScheduling.user_id == current_user.id,
-                    EmailScheduling.gmail_message_id == payload.gmail_message_id,
-                )
-            )
-        if row is None:
-            row = EmailScheduling(
-                user_id=current_user.id,
-                gmail_message_id=payload.gmail_message_id,
-                event_title=scheduling_result.event_summary,
-                start_datetime=action.start_time,
-                end_datetime=action.end_time,
-                attendees_json=json.dumps(action.attendees),
-                suggested_reply=scheduling_result.suggested_reply or None,
-                status="PENDING",
-            )
-            db.add(row)
-        else:
-            row.event_title = scheduling_result.event_summary
-            row.start_datetime = action.start_time
-            row.end_datetime = action.end_time
-            row.attendees_json = json.dumps(action.attendees)
-            row.suggested_reply = scheduling_result.suggested_reply or None
+        row = upsert_scheduling_from_extraction(
+            db,
+            current_user.id,
+            gmail_message_id=payload.gmail_message_id,
+            event_title=scheduling_result.event_summary,
+            start_datetime=action.start_time,
+            end_datetime=action.end_time,
+            attendees=action.attendees,
+            suggested_reply=scheduling_result.suggested_reply or None,
+            status="PENDING",
+        )
         db.commit()
         db.refresh(row)
         scheduling_id = str(row.id)
@@ -545,6 +699,8 @@ async def analyze_email(
         is_safe=security_result.is_safe,
         risk_level=security_result.risk_level,
         warnings=security_result.warnings,
+        category=category,
+        confidence=confidence,
     )
     if payload.gmail_message_id:
         existing_cache = db.scalar(
@@ -556,12 +712,26 @@ async def analyze_email(
         if existing_cache:
             existing_cache.response_json = response.model_dump_json()
         else:
-            db.add(EmailAnalysisCache(
-                user_id=current_user.id,
-                gmail_message_id=payload.gmail_message_id,
-                response_json=response.model_dump_json(),
-            ))
-        db.commit()
+            try:
+                with db.begin_nested():
+                    db.add(EmailAnalysisCache(
+                        user_id=current_user.id,
+                        gmail_message_id=payload.gmail_message_id,
+                        response_json=response.model_dump_json(),
+                    ))
+            except IntegrityError:
+                logger.debug(
+                    "analyze cache race on insert gmail_message_id=%s — keeping existing row",
+                    payload.gmail_message_id,
+                )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.warning(
+                "analyze: cache commit race gmail_message_id=%s",
+                payload.gmail_message_id,
+            )
     return response
 
 
@@ -581,22 +751,145 @@ def list_scheduled_events(
         .where(EmailScheduling.user_id == current_user.id)
         .order_by(EmailScheduling.created_at.desc())
     ).all()
-    return [
-        ScheduleEventResponse(
-            id=str(row.id),
-            title=row.event_title or "(Không có tiêu đề)",
-            startTime=row.start_datetime.astimezone(timezone(timedelta(hours=7))).isoformat() if row.start_datetime else "",
-            endTime=row.end_datetime.astimezone(timezone(timedelta(hours=7))).isoformat() if row.end_datetime else "",
-            attendees=row.attendees,
-            status=row.status,
-            emailSnippet=row.event_title or "",
-            alternativeSlots=[],
-            html_link=row.google_calendar_html_link,
-            meet_link=row.google_meet_link,
-            is_synced=bool(row.google_calendar_event_id),
+    return [row_to_response(row) for row in rows]
+
+
+@router.post(
+    "/scheduled-events",
+    response_model=ScheduleEventResponse,
+    summary="Create a calendar event manually",
+)
+def create_scheduled_event(
+    payload: CreateScheduleEventRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ScheduleEventResponse:
+    """Create a new scheduling row from the UI (deduped by time slot)."""
+    if payload.end_time <= payload.start_time:
+        raise HTTPException(status_code=400, detail="Thời gian kết thúc phải sau thời gian bắt đầu.")
+
+    row = upsert_scheduling_from_extraction(
+        db,
+        current_user.id,
+        gmail_message_id=None,
+        event_title=payload.title,
+        start_datetime=payload.start_time,
+        end_datetime=payload.end_time,
+        attendees=payload.attendees,
+        suggested_reply=None,
+        status="PENDING",
+    )
+    db.commit()
+    db.refresh(row)
+    return row_to_response(row)
+
+
+@router.put(
+    "/scheduled-events/{scheduling_id}",
+    response_model=ScheduleEventResponse,
+    summary="Update a pending or conflict calendar event",
+)
+def update_scheduled_event(
+    scheduling_id: uuid.UUID,
+    payload: UpdateScheduleEventRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ScheduleEventResponse:
+    """Update title, time, or attendees for a non-confirmed event."""
+    row = get_user_scheduling(db, current_user.id, scheduling_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+    if row.status == "CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail="Không thể chỉnh sửa lịch đã xác nhận. Hãy huỷ lịch trước khi tạo lại.",
         )
-        for row in rows
-    ]
+
+    if payload.title is not None:
+        row.event_title = payload.title
+    if payload.start_time is not None:
+        row.start_datetime = payload.start_time
+    if payload.end_time is not None:
+        row.end_datetime = payload.end_time
+    if payload.attendees is not None:
+        row.attendees_json = json.dumps(payload.attendees)
+
+    start = row.start_datetime
+    end = row.end_datetime
+    if start is None or end is None:
+        raise HTTPException(status_code=400, detail="Lịch hẹn thiếu thời gian bắt đầu hoặc kết thúc.")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="Thời gian kết thúc phải sau thời gian bắt đầu.")
+
+    if row.status == "CONFLICT":
+        row.status = "PENDING"
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return row_to_response(row)
+
+
+@router.delete(
+    "/scheduled-events/{scheduling_id}",
+    summary="Delete a calendar event permanently",
+    description="Hard-deletes a PENDING/CONFLICT/CANCELLED row. CONFIRMED rows must use /cancel.",
+)
+async def delete_scheduled_event(
+    scheduling_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Remove a scheduling row from the database."""
+    row = get_user_scheduling(db, current_user.id, scheduling_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+
+    if row.status == "CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail="Lịch đã xác nhận — dùng huỷ lịch thay vì xóa.",
+        )
+
+    db.delete(row)
+    db.commit()
+    return {"message": "Event deleted.", "id": str(scheduling_id)}
+
+
+@router.post(
+    "/scheduled-events/{scheduling_id}/resolve",
+    response_model=ScheduleEventResponse,
+    summary="Resolve a scheduling conflict with a new time slot",
+)
+def resolve_scheduled_conflict(
+    scheduling_id: uuid.UUID,
+    payload: ResolveScheduleConflictRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ScheduleEventResponse:
+    """Apply an alternative start time and mark the row as PENDING."""
+    row = get_user_scheduling(db, current_user.id, scheduling_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scheduling event not found.")
+    if row.status != "CONFLICT":
+        raise HTTPException(status_code=400, detail="Lịch hẹn không ở trạng thái xung đột.")
+
+    new_end = payload.new_end_time
+    if new_end is None and row.start_datetime and row.end_datetime:
+        duration = row.end_datetime - row.start_datetime
+        new_end = payload.new_time + duration
+    elif new_end is None:
+        new_end = payload.new_time + timedelta(hours=1)
+
+    if new_end <= payload.new_time:
+        raise HTTPException(status_code=400, detail="Thời gian kết thúc phải sau thời gian bắt đầu.")
+
+    row.start_datetime = payload.new_time
+    row.end_datetime = new_end
+    row.status = "PENDING"
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return row_to_response(row)
 
 
 @router.post(
@@ -815,3 +1108,37 @@ async def classify_quick(
         for item in valid_items
         if item.thread_id in cache
     ]
+
+
+# Tuneable cap — reduce to 3 if Gemini is still unstable during demo rehearsal.
+MAX_PIPELINE_PER_LOAD = 5
+
+
+@router.post(
+    "/fetch-cached-analyses",
+    response_model=dict[str, AnalyzeEmailResponse],
+    summary="Batch cache lookup — returns cached AnalyzeEmailResponse entries only (no Gemini calls)",
+    description=(
+        "Fast DB-only lookup across email_analysis_cache keyed by (user_id, gmail_message_id). "
+        "Returns only the message IDs that have a cached entry; missing keys = not yet processed. "
+        "Used by the inbox loader to determine which emails skip the full pipeline."
+    ),
+)
+def fetch_cached_analyses(
+    gmail_message_ids: list[str] = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, AnalyzeEmailResponse]:
+    """Return cached AnalyzeEmailResponse for each gmail_message_id that has a cache hit."""
+    if not gmail_message_ids:
+        return {}
+    rows = db.scalars(
+        select(EmailAnalysisCache).where(
+            EmailAnalysisCache.gmail_message_id.in_(gmail_message_ids),
+            EmailAnalysisCache.user_id == current_user.id,
+        )
+    ).all()
+    return {
+        row.gmail_message_id: AnalyzeEmailResponse.model_validate_json(row.response_json)
+        for row in rows
+    }

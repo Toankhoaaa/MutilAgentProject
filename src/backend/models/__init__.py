@@ -8,6 +8,7 @@ from backend.models.delegation_item import DelegationItem
 from backend.models.delegation_settings import DelegationSettings
 from backend.models.department import Department
 from backend.models.draft import Draft
+from backend.models.draft_cache import DraftCache
 from backend.models.email_analysis_cache import EmailAnalysisCache
 from backend.models.email_rule import EmailRule
 from backend.models.email_scheduling import EmailScheduling
@@ -28,6 +29,7 @@ __all__ = [
     "DelegationSettings",
     "Department",
     "Draft",
+    "DraftCache",
     "EmailAnalysisCache",
     "EmailRule",
     "EmailScheduling",
